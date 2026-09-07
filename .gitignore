@@ -1,0 +1,6 @@
+exchange_server
+trader_client
+market_data_client
+*.o
+.DS_Store
+.vscode/
