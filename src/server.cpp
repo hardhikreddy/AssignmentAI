@@ -39,6 +39,7 @@ struct Client {
     std::deque<std::string> output;
     size_t output_bytes = 0;
     size_t output_offset = 0;
+    bool input_closed = false;
     bool closing = false;
 };
 
@@ -214,7 +215,9 @@ private:
         std::vector<int> doomed;
         doomed.reserve(clients_.size());
         for (const auto& [fd, client] : clients_) {
-            if (client.closing) doomed.push_back(fd);
+            if (client.closing || (client.input_closed && client.output.empty())) {
+                doomed.push_back(fd);
+            }
         }
         for (int fd : doomed) close_client(fd);
     }
@@ -245,18 +248,20 @@ private:
     void receive_from_client(Client& client) {
         char buffer[8192];
 
-        while (!client.closing) {
-            ssize_t n = recv(client.fd, buffer, sizeof(buffer), 0);
+        while (!client.closing && !client.input_closed) {
+            const ssize_t n = recv(client.fd, buffer, sizeof(buffer), 0);
+
             if (n > 0) {
                 client.input.append(buffer, static_cast<size_t>(n));
                 if (client.input.size() > MAX_INPUT_BUFFER) {
+                    client.input.clear();
                     queue_message(client, "ERROR message too long");
-                    client.closing = true;
+                    client.input_closed = true;
                     break;
                 }
 
                 while (!client.closing) {
-                    size_t newline = client.input.find('\n');
+                    const size_t newline = client.input.find('\n');
                     if (newline == std::string::npos) break;
 
                     std::string line = client.input.substr(0, newline);
@@ -268,7 +273,9 @@ private:
             }
 
             if (n == 0) {
-                client.closing = true;
+                // TCP FIN: stop reading, but keep the socket alive long enough
+                // to flush any protocol response already queued.
+                client.input_closed = true;
                 break;
             }
 
@@ -329,10 +336,7 @@ private:
     }
 
     void handle_subscribe(Client& client, const std::vector<std::string>& tokens) {
-        if (client.role == Role::UNKNOWN) {
-            client.role = Role::MARKET_DATA;
-        }
-        if (client.role != Role::MARKET_DATA) {
+        if (client.role == Role::TRADER) {
             queue_message(client, "ERROR command not permitted for Trader Client");
             return;
         }
@@ -340,31 +344,43 @@ private:
             queue_message(client, "ERROR invalid SUBSCRIBE syntax");
             return;
         }
+
         Instrument instrument;
         if (!parse_instrument(tokens[1], instrument)) {
             queue_message(client, "ERROR invalid instrument");
             return;
         }
+
+        if (client.role == Role::UNKNOWN) {
+            client.role = Role::MARKET_DATA;
+        }
+
         client.subscriptions.insert(instrument_index(instrument));
         queue_message(client, "OK");
     }
 
     void handle_unsubscribe(Client& client, const std::vector<std::string>& tokens) {
-        if (client.role != Role::MARKET_DATA) {
-            queue_message(client, "ERROR command not permitted");
+        if (client.role == Role::TRADER) {
+            queue_message(client, "ERROR command not permitted for Trader Client");
             return;
         }
         if (tokens.size() != 2) {
             queue_message(client, "ERROR invalid UNSUBSCRIBE syntax");
             return;
         }
+
         Instrument instrument;
         if (!parse_instrument(tokens[1], instrument)) {
             queue_message(client, "ERROR invalid instrument");
             return;
         }
+
+        if (client.role == Role::UNKNOWN) {
+            client.role = Role::MARKET_DATA;
+        }
+
         client.subscriptions.erase(instrument_index(instrument));
-        queue_message(client, "OK");
+        queue_message(client, "OK");    
     }
 
     void handle_order(Client& client, const std::vector<std::string>& tokens, Side side) {
@@ -583,15 +599,16 @@ private:
         fds.push_back({listen_fd_, POLLIN, 0});
 
         for (const auto& [fd, client] : clients_) {
-            short events = POLLIN;
+            short events = 0;
+            if (!client.input_closed) events |= POLLIN;
             if (!client.output.empty()) events |= POLLOUT;
             fds.push_back({fd, events, 0});
         }
 
-        int ready = poll(fds.data(), fds.size(), -1);
+        const int ready = poll(fds.data(), fds.size(), -1);
         if (ready == -1) {
             if (errno == EINTR) return true;
-            std::cerr << "poll() failed: " << std::strerror(errno) << "\n";
+            std::cerr << "poll() failed: " << std::strerror(errno) << '\n';
             return false;
         }
 
@@ -601,37 +618,37 @@ private:
 
         for (size_t i = 1; i < fds.size(); ++i) {
             const int fd = fds[i].fd;
-            auto client_it = clients_.find(fd);
-            if (client_it == clients_.end()) continue;
-            Client& client = client_it->second;
+            Client* client = find_client(fd);
+            if (client == nullptr) continue;
 
-            short events = fds[i].revents;
+            const short events = fds[i].revents;
+
             if (events & POLLNVAL) {
-                client.closing = true;
+                client->closing = true;
                 continue;
             }
-            if (events & (POLLERR | POLLHUP)) {
-                // If POLLIN is also set, process the readable bytes first.
-                if (!(events & POLLIN)) {
-                    client.closing = true;
-                    continue;
-                }
+
+            if ((events & POLLERR) && !(events & POLLIN)) {
+                client->closing = true;
+                continue;
             }
 
-            if (events & POLLIN) {
-                receive_from_client(client);
+            if (events & (POLLIN | POLLHUP)) {
+                receive_from_client(*client);
             }
 
-            if (!client.closing && (events & POLLOUT)) {
-                send_pending(client);
+            // This also flushes replies created while handling POLLIN above.
+            if (!client->closing && !client->output.empty()) {
+                send_pending(*client);
+            }
+
+            if (client->input_closed && client->output.empty()) {
+                client->closing = true;
             }
         }
 
-        // Try to flush newly queued data on sockets that became ready only
-        // because application processing generated output. POLLOUT will be
-        // requested on the next poll iteration if anything remains.
-        cleanup_marked_clients();
-        return true;
+    cleanup_marked_clients();
+    return true;
     }
 };
 

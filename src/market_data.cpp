@@ -14,6 +14,7 @@ static bool valid_instrument(const std::string& s) {
 
 static void print_complete_lines(std::string& buffer) {
     while (true) {
+        
         size_t pos = buffer.find('\n');
         if (pos == std::string::npos) return;
         std::string line = buffer.substr(0, pos);
