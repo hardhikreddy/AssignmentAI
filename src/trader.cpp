@@ -1,22 +1,45 @@
 #include <cerrno>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <io.h>
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#endif
+#else
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include "net_utils.hpp"
 
-static void print_complete_lines(std::string& buffer) {
+// Print all complete '\n'-terminated lines from buffer using a read cursor
+// instead of erasing from the front on every newline (avoids O(n^2) shifts).
+static void print_complete_lines(std::string& buffer, size_t& offset) {
     while (true) {
-        size_t pos = buffer.find('\n');
-        if (pos == std::string::npos) return;
-        std::string line = buffer.substr(0, pos);
-        buffer.erase(0, pos + 1);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t pos = buffer.find('\n', offset);
+        if (pos == std::string::npos) break;
+
+        std::string_view line(buffer.data() + offset, pos - offset);
+        offset = pos + 1;
+
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         std::cout << line << '\n' << std::flush;
+    }
+
+    // Compact: only copy-shift when we've consumed at least half.
+    if (offset >= buffer.size() / 2 || offset >= 4096) {
+        buffer.erase(0, offset);
+        offset = 0;
     }
 }
 
@@ -42,7 +65,9 @@ int main(int argc, char* argv[]) {
     std::cout << "Enter BUY/SELL/CANCEL/QUIT commands.\n" << std::flush;
 
     std::string socket_buffer;
+    size_t socket_offset = 0;
     std::string stdin_buffer;
+    size_t stdin_offset = 0;
     bool running = true;
 
     while (running) {
@@ -68,7 +93,7 @@ int main(int argc, char* argv[]) {
             ssize_t n = recv(fd, buffer, sizeof(buffer), 0);
             if (n > 0) {
                 socket_buffer.append(buffer, static_cast<size_t>(n));
-                print_complete_lines(socket_buffer);
+                print_complete_lines(socket_buffer, socket_offset);
             } else if (n == 0) {
                 std::cout << "Server closed the connection.\n";
                 break;
@@ -90,19 +115,34 @@ int main(int argc, char* argv[]) {
             } else {
                 stdin_buffer.append(buffer, static_cast<size_t>(n));
                 while (true) {
-                    size_t pos = stdin_buffer.find('\n');
+                    const size_t pos = stdin_buffer.find('\n', stdin_offset);
                     if (pos == std::string::npos) break;
-                    std::string line = stdin_buffer.substr(0, pos);
-                    stdin_buffer.erase(0, pos + 1);
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
-                    if (!send_all_blocking(fd, line + "\n")) {
+
+                    std::string_view sv(stdin_buffer.data() + stdin_offset,
+                                       pos - stdin_offset);
+                    stdin_offset = pos + 1;
+
+                    // Strip trailing CR.
+                    if (!sv.empty() && sv.back() == '\r') sv.remove_suffix(1);
+
+                    // Build the line to send (need a null-terminated std::string
+                    // for send_all_blocking, plus the '\n').
+                    std::string line(sv);
+                    line += '\n';
+                    if (!send_all_blocking(fd, line)) {
                         running = false;
                         break;
                     }
-                    if (line == "QUIT") {
+                    if (sv == "QUIT") {
                         running = false;
                         break;
                     }
+                }
+
+                // Compact stdin buffer.
+                if (stdin_offset >= stdin_buffer.size() / 2 || stdin_offset >= 4096) {
+                    stdin_buffer.erase(0, stdin_offset);
+                    stdin_offset = 0;
                 }
             }
         }

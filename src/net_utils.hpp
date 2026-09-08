@@ -4,15 +4,45 @@
 #include <cstring>
 #include <string>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <io.h>
+typedef SSIZE_T ssize_t;
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+#else
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 inline bool set_nonblocking(int fd) {
     const int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags == -1) return false;
     return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
+}
+
+// Disable Nagle's algorithm so small messages are sent immediately without
+// waiting to coalesce with subsequent data (reduces latency).
+inline void set_tcp_nodelay(int fd) {
+    const int flag = 1;
+    (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+}
+
+// Increase kernel socket buffer sizes to 256 KB (from the typical 4–8 KB
+// default). Larger buffers absorb bursts and reduce EAGAIN stalls when many
+// messages arrive / depart in rapid succession.
+inline void set_socket_buffers(int fd) {
+    const int buf_size = 256 * 1024;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
 }
 
 inline int connect_tcp(const std::string& host, const std::string& port) {
@@ -31,6 +61,7 @@ inline int connect_tcp(const std::string& host, const std::string& port) {
         if (fd == -1) continue;
 
         if (::connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+            set_tcp_nodelay(fd);
             break;
         }
 

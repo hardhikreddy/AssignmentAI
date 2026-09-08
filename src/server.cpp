@@ -2,20 +2,26 @@
 #include <charconv>
 #include <csignal>
 #include <cstdint>
-#include <deque>
 #include <iostream>
 #include <list>
 #include <map>
-#include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include <cerrno>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include "net_utils.hpp"
 
@@ -36,9 +42,12 @@ struct Client {
     std::string username;
     std::unordered_set<int> subscriptions;
     std::string input;
-    std::deque<std::string> output;
-    size_t output_bytes = 0;
+    size_t input_offset = 0;   // cursor: avoids O(n) erase on every newline
+    // Single contiguous output buffer + write cursor eliminates one heap
+    // allocation per queued message (vs deque<string>).
+    std::string output_buf;
     size_t output_offset = 0;
+    size_t output_bytes = 0;   // bytes currently buffered (for limit check)
     bool input_closed = false;
     bool closing = false;
 };
@@ -102,11 +111,20 @@ private:
     int listen_fd_ = -1;
     uint64_t next_client_id_ = 1;
     uint64_t next_order_id_ = 0;
+    bool fds_dirty_ = true;          // true whenever client set changes
 
     std::unordered_map<int, Client> clients_;
     std::unordered_map<uint64_t, int> client_id_to_fd_;
     std::unordered_map<std::string, int> trader_user_to_fd_;
     std::unordered_map<int32_t, OrderRef> order_index_;
+
+    // Subscriber index: per-instrument set of fds for market-data clients.
+    // Avoids iterating all clients on every broadcast_trade call.
+    std::unordered_set<int> md_subscribers_[2];
+
+    // Persistent vectors reused across poll loops (avoids per-loop heap allocs).
+    std::vector<pollfd> fds_;
+    std::vector<int> doomed_;
 
     // [instrument][side][price] -> FIFO list of orders at that price.
     std::map<int32_t, OrderList> books_[2][2];
@@ -119,17 +137,15 @@ private:
         return static_cast<int>(side);
     }
 
-    static bool parse_int32(const std::string& text, int32_t& value, bool positive_only) {
+    static bool parse_int32(std::string_view text, int32_t& value, bool positive_only) {
         if (text.empty()) return false;
         for (char c : text) {
             if (c < '0' || c > '9') return false;
         }
 
         long long parsed = 0;
-        const char* first = text.data();
-        const char* last = first + text.size();
-        auto result = std::from_chars(first, last, parsed);
-        if (result.ec != std::errc() || result.ptr != last) return false;
+        auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+        if (result.ec != std::errc() || result.ptr != text.data() + text.size()) return false;
         if (positive_only) {
             if (parsed < 1 || parsed > MAX_VALUE) return false;
         } else {
@@ -139,24 +155,35 @@ private:
         return true;
     }
 
-    static bool parse_instrument(const std::string& text, Instrument& instrument) {
-        if (text == "JNST") {
-            instrument = Instrument::JNST;
-            return true;
-        }
-        if (text == "IMCT") {
-            instrument = Instrument::IMCT;
-            return true;
-        }
+    static bool parse_instrument(std::string_view text, Instrument& instrument) {
+        if (text == "JNST") { instrument = Instrument::JNST; return true; }
+        if (text == "IMCT") { instrument = Instrument::IMCT; return true; }
         return false;
     }
 
-    static std::string instrument_name(Instrument instrument) {
+    static const char* instrument_name(Instrument instrument) {
         return instrument == Instrument::JNST ? "JNST" : "IMCT";
     }
 
-    static std::string side_name(Side side) {
+    static const char* side_name(Side side) {
         return side == Side::BUY ? "BUY" : "SELL";
+    }
+
+    // Zero-allocation tokeniser: splits 'line' on spaces into string_views.
+    static std::vector<std::string_view> tokenize(std::string_view line) {
+        std::vector<std::string_view> tokens;
+        tokens.reserve(4);
+        size_t start = 0;
+        while (start < line.size()) {
+            // skip spaces
+            while (start < line.size() && line[start] == ' ') ++start;
+            if (start >= line.size()) break;
+            size_t end = start;
+            while (end < line.size() && line[end] != ' ') ++end;
+            tokens.push_back(line.substr(start, end - start));
+            start = end;
+        }
+        return tokens;
     }
 
     Client* find_client(int fd) {
@@ -170,12 +197,12 @@ private:
         return find_client(fd_it->second);
     }
 
-    bool queue_message(Client& client, const std::string& message) {
+    // Accept by value so callers can pass temporaries without an extra copy.
+    bool queue_message(Client& client, std::string message) {
         if (client.closing) return false;
-        std::string data = message;
-        if (data.empty() || data.back() != '\n') data.push_back('\n');
+        if (message.empty() || message.back() != '\n') message.push_back('\n');
 
-        if (client.output_bytes + data.size() > MAX_OUTPUT_BUFFER) {
+        if (client.output_bytes + message.size() > MAX_OUTPUT_BUFFER) {
             std::cerr << "Closing fd " << client.fd
                       << " because its output buffer exceeded "
                       << MAX_OUTPUT_BUFFER << " bytes\n";
@@ -183,15 +210,16 @@ private:
             return false;
         }
 
-        client.output_bytes += data.size();
-        client.output.push_back(std::move(data));
+        client.output_bytes += message.size();
+        // Append directly into the flat buffer — no heap alloc per message.
+        client.output_buf += message;
         return true;
     }
 
-    bool queue_to_client_id(uint64_t client_id, const std::string& message) {
+    bool queue_to_client_id(uint64_t client_id, std::string message) {
         Client* client = find_client_by_id(client_id);
         if (client == nullptr || client->closing) return false;
-        return queue_message(*client, message);
+        return queue_message(*client, std::move(message));
     }
 
     void close_client(int fd) {
@@ -206,20 +234,27 @@ private:
             }
         }
 
+        // Remove from subscriber index if this was a market-data client.
+        if (client.role == Role::MARKET_DATA) {
+            for (int inst_idx : {0, 1}) {
+                md_subscribers_[inst_idx].erase(fd);
+            }
+        }
+
         client_id_to_fd_.erase(client.id);
         close(fd);
         clients_.erase(it);
+        fds_dirty_ = true;
     }
 
     void cleanup_marked_clients() {
-        std::vector<int> doomed;
-        doomed.reserve(clients_.size());
+        doomed_.clear();
         for (const auto& [fd, client] : clients_) {
-            if (client.closing || (client.input_closed && client.output.empty())) {
-                doomed.push_back(fd);
+            if (client.closing || (client.input_closed && client.output_buf.size() == client.output_offset)) {
+                doomed_.push_back(fd);
             }
         }
-        for (int fd : doomed) close_client(fd);
+        for (int fd : doomed_) close_client(fd);
     }
 
     void accept_ready_clients() {
@@ -237,12 +272,28 @@ private:
                 continue;
             }
 
+            // Disable Nagle's algorithm for lower latency on individual messages.
+            set_tcp_nodelay(client_fd);
+            // Bump kernel send/recv buffers to reduce EAGAIN stalls under load.
+            set_socket_buffers(client_fd);
+
             Client client;
             client.fd = client_fd;
             client.id = next_client_id_++;
             clients_.emplace(client_fd, std::move(client));
             client_id_to_fd_[clients_.at(client_fd).id] = client_fd;
+            fds_dirty_ = true;
         }
+    }
+
+    void compact_input_buffer(Client& client) {
+        // Only compact when we've consumed at least half the buffer
+        // to amortise the O(n) copy.
+        if (client.input_offset == 0) return;
+        if (client.input_offset < client.input.size() / 2 &&
+            client.input.size() < MAX_INPUT_BUFFER / 2) return;
+        client.input.erase(0, client.input_offset);
+        client.input_offset = 0;
     }
 
     void receive_from_client(Client& client) {
@@ -255,26 +306,36 @@ private:
                 client.input.append(buffer, static_cast<size_t>(n));
                 if (client.input.size() > MAX_INPUT_BUFFER) {
                     client.input.clear();
+                    client.input_offset = 0;
                     queue_message(client, "ERROR message too long");
                     client.input_closed = true;
                     break;
                 }
 
                 while (!client.closing) {
-                    const size_t newline = client.input.find('\n');
+                    // Search from the current cursor position only.
+                    const size_t newline = client.input.find('\n', client.input_offset);
                     if (newline == std::string::npos) break;
 
-                    std::string line = client.input.substr(0, newline);
-                    client.input.erase(0, newline + 1);
-                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    // Build a string_view of the line without any allocation.
+                    std::string_view line(client.input.data() + client.input_offset,
+                                         newline - client.input_offset);
+                    client.input_offset = newline + 1;
+
+                    // Strip trailing CR.
+                    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
                     process_message(client, line);
                 }
+
+                // Periodically compact to reclaim memory.
+                compact_input_buffer(client);
                 continue;
             }
 
             if (n == 0) {
                 // TCP FIN: stop reading, but keep the socket alive long enough
                 // to flush any protocol response already queued.
+                compact_input_buffer(client);
                 client.input_closed = true;
                 break;
             }
@@ -287,17 +348,18 @@ private:
     }
 
     void send_pending(Client& client) {
-        while (!client.output.empty() && !client.closing) {
-            std::string& message = client.output.front();
-            const char* data = message.data() + client.output_offset;
-            size_t remaining = message.size() - client.output_offset;
+        // Drain from the flat output_buf starting at output_offset.
+        while (client.output_offset < client.output_buf.size() && !client.closing) {
+            const char* data = client.output_buf.data() + client.output_offset;
+            const size_t remaining = client.output_buf.size() - client.output_offset;
 
-            ssize_t n = send(client.fd, data, remaining, MSG_NOSIGNAL);
+            const ssize_t n = send(client.fd, data, remaining, MSG_NOSIGNAL);
             if (n > 0) {
                 client.output_offset += static_cast<size_t>(n);
                 client.output_bytes -= static_cast<size_t>(n);
-                if (client.output_offset == message.size()) {
-                    client.output.pop_front();
+                // Compact the buffer once fully drained to reclaim memory.
+                if (client.output_offset == client.output_buf.size()) {
+                    client.output_buf.clear();
                     client.output_offset = 0;
                 }
                 continue;
@@ -310,7 +372,7 @@ private:
         }
     }
 
-    void handle_login(Client& client, const std::vector<std::string>& tokens) {
+    void handle_login(Client& client, const std::vector<std::string_view>& tokens) {
         if (client.role != Role::UNKNOWN) {
             queue_message(client, "ERROR client role already selected");
             return;
@@ -319,23 +381,26 @@ private:
             queue_message(client, "ERROR invalid LOGIN syntax");
             return;
         }
-        const std::string& username = tokens[1];
-        if (username.find_first_of(" \t\r\n") != std::string::npos) {
-            queue_message(client, "ERROR invalid username");
-            return;
+        const std::string_view username = tokens[1];
+        for (char c : username) {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                queue_message(client, "ERROR invalid username");
+                return;
+            }
         }
-        if (trader_user_to_fd_.count(username) != 0) {
+        std::string uname(username);
+        if (trader_user_to_fd_.count(uname) != 0) {
             queue_message(client, "ERROR username already in use");
             return;
         }
 
         client.role = Role::TRADER;
-        client.username = username;
-        trader_user_to_fd_[username] = client.fd;
+        client.username = std::move(uname);
+        trader_user_to_fd_[client.username] = client.fd;
         queue_message(client, "OK");
     }
 
-    void handle_subscribe(Client& client, const std::vector<std::string>& tokens) {
+    void handle_subscribe(Client& client, const std::vector<std::string_view>& tokens) {
         if (client.role == Role::TRADER) {
             queue_message(client, "ERROR command not permitted for Trader Client");
             return;
@@ -355,11 +420,13 @@ private:
             client.role = Role::MARKET_DATA;
         }
 
-        client.subscriptions.insert(instrument_index(instrument));
+        const int idx = instrument_index(instrument);
+        client.subscriptions.insert(idx);
+        md_subscribers_[idx].insert(client.fd);
         queue_message(client, "OK");
     }
 
-    void handle_unsubscribe(Client& client, const std::vector<std::string>& tokens) {
+    void handle_unsubscribe(Client& client, const std::vector<std::string_view>& tokens) {
         if (client.role == Role::TRADER) {
             queue_message(client, "ERROR command not permitted for Trader Client");
             return;
@@ -379,11 +446,13 @@ private:
             client.role = Role::MARKET_DATA;
         }
 
-        client.subscriptions.erase(instrument_index(instrument));
-        queue_message(client, "OK");    
+        const int idx = instrument_index(instrument);
+        client.subscriptions.erase(idx);
+        md_subscribers_[idx].erase(client.fd);
+        queue_message(client, "OK");
     }
 
-    void handle_order(Client& client, const std::vector<std::string>& tokens, Side side) {
+    void handle_order(Client& client, const std::vector<std::string_view>& tokens, Side side) {
         if (client.role != Role::TRADER) {
             queue_message(client, "ERROR command not permitted for Market-Data Client");
             return;
@@ -414,6 +483,7 @@ private:
         }
 
         const int32_t order_id = static_cast<int32_t>(next_order_id_++);
+
         queue_message(client, "ORDER_ACCEPTED " + std::to_string(order_id));
 
         Order incoming;
@@ -431,36 +501,43 @@ private:
         }
     }
 
+    // Build "BOUGHT <inst> <qty> <price>" or "SOLD <inst> <qty> <price>" efficiently.
+    static std::string make_fill_msg(const char* verb, const char* inst,
+                                     int32_t qty, int32_t price) {
+        return std::string(verb) + " " + inst + " " + std::to_string(qty) + " " + std::to_string(price);
+    }
+
     void match_incoming_order(Order& incoming) {
         const int inst = instrument_index(incoming.instrument);
         const Side opposite_side = incoming.side == Side::BUY ? Side::SELL : Side::BUY;
         auto& opposite_levels = books_[inst][side_index(opposite_side)];
-        auto level_it = opposite_levels.find(incoming.price);
 
+        // Same-price-only matching per assignment spec:
+        // A BUY and a SELL match only if they are at exactly the same price.
+        auto level_it = opposite_levels.find(incoming.price);
         if (level_it == opposite_levels.end()) return;
 
+        const char* inst_name = instrument_name(incoming.instrument);
         OrderList& level = level_it->second;
+
         while (incoming.remaining > 0 && !level.empty()) {
             auto resting_it = level.begin();
             Order& resting = *resting_it;
-            int32_t traded = std::min(incoming.remaining, resting.remaining);
+            const int32_t traded = std::min(incoming.remaining, resting.remaining);
 
             incoming.remaining -= traded;
             resting.remaining -= traded;
 
-            const Order& buy_order = incoming.side == Side::BUY ? incoming : resting;
+            const Order& buy_order  = incoming.side == Side::BUY  ? incoming : resting;
             const Order& sell_order = incoming.side == Side::SELL ? incoming : resting;
 
+            // Use pre-built strings with reserve; avoid repeated + concatenations.
             queue_to_client_id(buy_order.owner_client_id,
-                               "BOUGHT " + instrument_name(incoming.instrument) +
-                               " " + std::to_string(traded) +
-                               " " + std::to_string(incoming.price));
+                               make_fill_msg("BOUGHT", inst_name, traded, incoming.price));
             queue_to_client_id(sell_order.owner_client_id,
-                               "SOLD " + instrument_name(incoming.instrument) +
-                               " " + std::to_string(traded) +
-                               " " + std::to_string(incoming.price));
+                               make_fill_msg("SOLD", inst_name, traded, incoming.price));
 
-            broadcast_trade(incoming.instrument, traded, incoming.price);
+            broadcast_trade(inst, inst_name, traded, incoming.price);
 
             if (resting.remaining == 0) {
                 order_index_.erase(resting.id);
@@ -487,7 +564,7 @@ private:
         };
     }
 
-    void handle_cancel(Client& client, const std::vector<std::string>& tokens) {
+    void handle_cancel(Client& client, const std::vector<std::string_view>& tokens) {
         if (client.role != Role::TRADER) {
             queue_message(client, "ERROR command not permitted for Market-Data Client");
             return;
@@ -522,34 +599,36 @@ private:
             books_[instrument_index(ref.instrument)][side_index(ref.side)].erase(ref.price);
         }
         order_index_.erase(it);
+
         queue_message(client, "ORDER_CANCELLED " + std::to_string(order_id));
     }
 
-    void broadcast_trade(Instrument instrument, int32_t quantity, int32_t price) {
-        const int instrument_id = instrument_index(instrument);
-        const std::string message = "TRADE " + instrument_name(instrument) +
-                                    " " + std::to_string(quantity) +
-                                    " " + std::to_string(price);
-        for (auto& [fd, client] : clients_) {
-            if (client.role == Role::MARKET_DATA &&
-                client.subscriptions.count(instrument_id) != 0) {
-                queue_message(client, message);
+    // broadcast_trade only visits the subscriber index for this instrument —
+    // O(subscribers) instead of O(all_clients).
+    void broadcast_trade(int instrument_id, const char* inst_name,
+                         int32_t quantity, int32_t price) {
+        if (md_subscribers_[instrument_id].empty()) return;
+
+        std::string message = "TRADE " + std::string(inst_name) + " " + std::to_string(quantity) + " " + std::to_string(price);
+
+        for (int fd : md_subscribers_[instrument_id]) {
+            Client* client = find_client(fd);
+            if (client != nullptr && !client->closing) {
+                queue_message(*client, message);  // copies the pre-built string
             }
         }
     }
 
-    void process_message(Client& client, const std::string& line) {
-        std::istringstream input(line);
-        std::vector<std::string> tokens;
-        std::string token;
-        while (input >> token) tokens.push_back(token);
+    void process_message(Client& client, std::string_view line) {
+        // Zero-allocation tokeniser using string_view.
+        const auto tokens = tokenize(line);
 
         if (tokens.empty()) {
             queue_message(client, "ERROR empty message");
             return;
         }
 
-        const std::string& command = tokens[0];
+        const std::string_view command = tokens[0];
 
         if (command == "QUIT") {
             if (tokens.size() != 1) {
@@ -594,34 +673,37 @@ private:
     }
 
     bool poll_once() {
-        std::vector<pollfd> fds;
-        fds.reserve(clients_.size() + 1);
-        fds.push_back({listen_fd_, POLLIN, 0});
-
+        // Rebuild fds_ every call but reuse the vector's capacity to avoid
+        // heap allocation. unordered_map iteration order is not stable so we
+        // cannot safely patch individual entries in-place.
+        fds_.clear();
+        fds_.reserve(clients_.size() + 1);
+        fds_.push_back({listen_fd_, POLLIN, 0});
         for (const auto& [fd, client] : clients_) {
             short events = 0;
             if (!client.input_closed) events |= POLLIN;
-            if (!client.output.empty()) events |= POLLOUT;
-            fds.push_back({fd, events, 0});
+            if (client.output_offset < client.output_buf.size()) events |= POLLOUT;
+            fds_.push_back({fd, events, 0});
         }
+        (void)fds_dirty_; // kept as a field in case a future ordered structure is used
 
-        const int ready = poll(fds.data(), fds.size(), -1);
+        const int ready = poll(fds_.data(), static_cast<nfds_t>(fds_.size()), -1);
         if (ready == -1) {
             if (errno == EINTR) return true;
             std::cerr << "poll() failed: " << std::strerror(errno) << '\n';
             return false;
         }
 
-        if (fds[0].revents & POLLIN) {
+        if (fds_[0].revents & POLLIN) {
             accept_ready_clients();
         }
 
-        for (size_t i = 1; i < fds.size(); ++i) {
-            const int fd = fds[i].fd;
+        for (size_t i = 1; i < fds_.size(); ++i) {
+            const int fd = fds_[i].fd;
             Client* client = find_client(fd);
             if (client == nullptr) continue;
 
-            const short events = fds[i].revents;
+            const short events = fds_[i].revents;
 
             if (events & POLLNVAL) {
                 client->closing = true;
@@ -638,17 +720,17 @@ private:
             }
 
             // This also flushes replies created while handling POLLIN above.
-            if (!client->closing && !client->output.empty()) {
+            if (!client->closing && client->output_offset < client->output_buf.size()) {
                 send_pending(*client);
             }
 
-            if (client->input_closed && client->output.empty()) {
+            if (client->input_closed && client->output_offset == client->output_buf.size()) {
                 client->closing = true;
             }
         }
 
-    cleanup_marked_clients();
-    return true;
+        cleanup_marked_clients();
+        return true;
     }
 };
 

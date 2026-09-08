@@ -1,26 +1,36 @@
 # COL334 Assignment 2 — The Socket Exchange
 
-C++17 implementation using direct POSIX TCP sockets and `poll()`.
+This is a C++17 TCP exchange server with interactive trader and market-data
+clients. The server uses one `poll()` event loop for listening, reads, and
+queued non-blocking writes.
 
 ## Build
+
+Use a POSIX-like environment with a C++17 compiler and `make`.
 
 ```sh
 make
 ```
 
-## Run server
+This creates `exchange_server`, `trader_client`, and `market_data_client` at
+the repository root. The supplied scripts in `server/` and `client/` launch
+these binaries and are the interface used by `experiment.py`.
+
+## Run
+
+Start the server:
 
 ```sh
 ./server/run-server 127.0.0.1 5000
 ```
 
-## Run trader
+Start a trader:
 
 ```sh
 ./client/run-trader 127.0.0.1 5000 alice
 ```
 
-Then enter protocol messages such as:
+Example trader input:
 
 ```text
 BUY JNST 100 238
@@ -29,38 +39,26 @@ CANCEL 0
 QUIT
 ```
 
-## Run market-data client
-
-```sh
-./client/run-market-data 127.0.0.1 5000 JNST
-```
-
-Multiple instruments may be supplied:
+Start a market-data client, optionally with initial subscriptions:
 
 ```sh
 ./client/run-market-data 127.0.0.1 5000 JNST IMCT
 ```
 
-The client also accepts interactive `SUBSCRIBE`, `UNSUBSCRIBE`, and `QUIT` commands.
+It also accepts `SUBSCRIBE`, `UNSUBSCRIBE`, and `QUIT` interactively.
 
-## Directory layout
+## Protocol and experiments
 
-```text
-COL334-A2/
-├── server/
-│   └── run-server
-├── client/
-│   ├── run-trader
-│   └── run-market-data
-├── src/
-│   ├── net_utils.hpp
-│   ├── server.cpp
-│   ├── trader.cpp
-│   └── market_data.cpp
-├── Makefile
-├── README.md
-├── experiment.py       # provided by instructor; do not modify
-└── report.pdf          # create for submission
+Supported instruments are `JNST` and `IMCT`. A trader begins with
+`LOGIN <username>`. Accepted orders receive `ORDER_ACCEPTED <id>`; matched
+traders receive `BOUGHT`/`SOLD`, and subscribers receive `TRADE` updates.
+
+After building, run the supplied harness from this directory:
+
+```sh
+python3 experiment.py 1
 ```
 
-The compiled executables are kept at the submission root because the required launcher interface can then use `exec` to start them.
+See [socket-exchange-guide.md](socket-exchange-guide.md) for the protocol and
+[experiment-runbook.md](experiment-runbook.md) for the experiments. Run
+`make clean` to remove compiled binaries.
