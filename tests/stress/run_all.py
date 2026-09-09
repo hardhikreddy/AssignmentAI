@@ -301,6 +301,19 @@ def role_login_locks_trader(_):
 
 
 @test
+def role_order_before_login(_):
+    with server() as srv:
+        c = Conn(srv.port, "t")
+        c.send("BUY JNST 1 1")
+        assert c.recv_line().startswith("ERROR")
+        c.send("CANCEL 0")
+        assert c.recv_line().startswith("ERROR")
+        # still unassigned, LOGIN must still work
+        c.send("LOGIN late")
+        c.expect("OK")
+
+
+@test
 def role_subscribe_locks_marketdata(_):
     with server() as srv:
         c = md(srv, "m1", "JNST")

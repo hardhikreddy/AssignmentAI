@@ -36,9 +36,9 @@ and cleans up the server it starts. Use `Ctrl-C` for experiments that wait.
 | 8 | Disconnect cleanup |
 
 The implementation evidence for experiments 3, 4, 5, and 7 is in
-`src/server.cpp`: newline-buffered input, an event-driven readiness loop
-(`src/event_poller.hpp`; `poll(2)` by default), and per-client queued output
-with non-blocking sends. `tests/stress/run_all.py` exercises the same
-behaviours as automated assertions. Do not edit `experiment.py` during
+`src/server.cpp`: newline-buffered input, a single `poll()` loop, and
+per-client queued output with non-blocking sends. `tests/stress/run_all.py`
+exercises the same behaviours as automated assertions. Do not edit
+`experiment.py` during
 normal runs. If startup fails, confirm `make` succeeded, port 5000 is free,
 and `server/run-server` is executable.

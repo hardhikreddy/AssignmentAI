@@ -37,11 +37,6 @@ inline void set_tcp_nodelay(int fd) {
     (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
 
-// NOTE: the server intentionally does NOT force SO_SNDBUF / SO_RCVBUF. Pinning
-// them (e.g. to 256 KiB) disables the kernel's socket-buffer auto-tuning and
-// reserves that space per socket -- with tens of thousands of connections that
-// is tens of GiB of wired memory and defeats the connection-scalability goal.
-
 inline int connect_tcp(const std::string& host, const std::string& port) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
