@@ -47,17 +47,27 @@ class Srv:
         raise RuntimeError("server not ready")
 
     def rss_kb(self):
-        with open(f"/proc/{self.proc.pid}/status") as f:
-            for line in f:
-                if line.startswith("VmRSS"):
-                    return int(line.split()[1])
-        return -1
+        try:
+            with open(f"/proc/{self.proc.pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS"):
+                        return int(line.split()[1])
+        except OSError:
+            pass
+        try:
+            out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(self.proc.pid)], text=True)
+            return int(out.strip())
+        except (subprocess.SubprocessError, ValueError):
+            return 0
 
     def cpu_seconds(self):
-        with open(f"/proc/{self.proc.pid}/stat") as f:
-            parts = f.read().split()
-        utime, stime = int(parts[13]), int(parts[14])
-        return (utime + stime) / os.sysconf("SC_CLK_TCK")
+        try:
+            with open(f"/proc/{self.proc.pid}/stat") as f:
+                parts = f.read().split()
+            utime, stime = int(parts[13]), int(parts[14])
+            return (utime + stime) / os.sysconf("SC_CLK_TCK")
+        except OSError:
+            return 0.0
 
     def stop(self):
         if self.proc.poll() is None:
@@ -244,7 +254,14 @@ def bench_idle_scaling():
             a.close()
             lat.sort()
             rss = srv.rss_kb()
-            fds = len(os.listdir(f"/proc/{srv.proc.pid}/fd"))
+            try:
+                fds = len(os.listdir(f"/proc/{srv.proc.pid}/fd"))
+            except OSError:
+                try:
+                    out = subprocess.check_output(["procstat", "-f", str(srv.proc.pid)], text=True)
+                    fds = len(out.strip().split("\n")) - 1
+                except subprocess.SubprocessError:
+                    fds = 0
             print(f"idle {target:6d}   : p50={lat[len(lat)//2]*1e6:8.0f}us "
                   f"p99={lat[int(len(lat)*0.99)]*1e6:8.0f}us  "
                   f"rss={rss/1024:6.1f}MB fds={fds}")

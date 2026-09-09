@@ -6,12 +6,9 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -O2
 #   POLLER=epoll   -> Linux epoll   (local benchmarking)
 #   POLLER=kqueue  -> FreeBSD kqueue (submission-target fast path)
 POLLER ?=
-ifeq ($(POLLER),epoll)
-CXXFLAGS += -DUSE_EPOLL
-endif
-ifeq ($(POLLER),kqueue)
-CXXFLAGS += -DUSE_KQUEUE
-endif
+CXXFLAGS_epoll = -DUSE_EPOLL
+CXXFLAGS_kqueue = -DUSE_KQUEUE
+CXXFLAGS += $(CXXFLAGS_$(POLLER))
 
 all: exchange_server trader_client market_data_client
 
