@@ -55,6 +55,7 @@ public:
     Poller() : epfd_(::epoll_create1(0)) {}
     ~Poller() { if (epfd_ != -1) ::close(epfd_); }
 
+    static const char* backend_name() { return "epoll"; }
     bool valid() const { return epfd_ != -1; }
 
     void add(int fd, bool want_read, bool want_write) {
@@ -117,6 +118,7 @@ public:
     Poller() : kq_(::kqueue()) {}
     ~Poller() { if (kq_ != -1) ::close(kq_); }
 
+    static const char* backend_name() { return "kqueue"; }
     bool valid() const { return kq_ != -1; }
 
     void add(int fd, bool want_read, bool want_write) {
@@ -219,6 +221,7 @@ private:
 
 class Poller {
 public:
+    static const char* backend_name() { return "poll"; }
     bool valid() const { return true; }
 
     void add(int fd, bool want_read, bool want_write) {

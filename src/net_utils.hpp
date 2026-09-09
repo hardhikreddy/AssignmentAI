@@ -36,14 +36,10 @@ inline void set_tcp_nodelay(int fd) {
     (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
 
-// Increase kernel socket buffer sizes to 256 KB (from the typical 4–8 KB
-// default). Larger buffers absorb bursts and reduce EAGAIN stalls when many
-// messages arrive / depart in rapid succession.
-inline void set_socket_buffers(int fd) {
-    const int buf_size = 256 * 1024;
-    (void)::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
-    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
-}
+// NOTE: the server intentionally does NOT force SO_SNDBUF / SO_RCVBUF. Pinning
+// them (e.g. to 256 KiB) disables the kernel's socket-buffer auto-tuning and
+// reserves that space per socket -- with tens of thousands of connections that
+// is tens of GiB of wired memory and defeats the connection-scalability goal.
 
 inline int connect_tcp(const std::string& host, const std::string& port) {
     addrinfo hints{};

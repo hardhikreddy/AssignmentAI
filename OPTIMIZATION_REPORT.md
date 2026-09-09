@@ -29,8 +29,31 @@ and on all three event-loop back ends.
 | 5 | `Poller` abstraction (`src/event_poller.hpp`): `poll` (default), `epoll` (`POLLER=epoll`), `kqueue` (`POLLER=kqueue`); interest registered incrementally, kernel call only on a real change | eliminates the per-iteration O(N) pollfd rebuild; epoll/kqueue make wakeups O(ready) instead of O(N) |
 | 6 | Per-socket fairness caps: ≤256 KiB recv and ≤1 MiB send serviced per client per loop iteration (socket stays level-triggered) | one flooding or bulk client can no longer monopolise the loop |
 | 7 | `listen()` backlog 128 → 1024 | fewer dropped SYNs during connection storms (bonus scale test) |
+| 8 | **Removed** the forced 256 KiB `SO_SNDBUF`/`SO_RCVBUF` on every accepted socket | 70 000 conns × 512 KiB ≈ **35 GiB** of kernel socket-buffer reservation — this alone made the bonus impossible; kernel auto-tuning is correct at scale |
+| 9 | Server raises its own `RLIMIT_NOFILE` soft limit to the hard limit at startup (`raise_fd_limit`) | otherwise it stops accepting at the inherited soft limit (often ~1–58 k) regardless of `kern.maxfilesperproc` |
+| 10 | `accept()` handles `EMFILE`/`ENFILE`: frees a reserved `/dev/null` fd, drains + rejects one pending connection, reclaims the reservation | at the fd ceiling the old code `break`s while the listen socket stays readable → 100 % CPU busy-spin; now it idles at 0 % and serves clients again once capacity frees |
 
 All changes keep the server **single-process, single-threaded, event-driven**.
+
+### Connection-scalability fixes (bonus §6.9) — verified
+
+Earlier builds could not hold ~70 000 simultaneous idle connections. Causes and
+fixes: change 8 (socket-buffer over-reservation) was the primary one; changes 9
+and 10 make the descriptor ceiling a graceful degradation instead of a hang.
+
+Verified in the local proxy (WSL, `ulimit -n 200000`, `connflood.py 72000
+--src-aliases 8`):
+
+| Back end | Connections held | Server open FDs | Server RSS | Server CPU while idle |
+|---|---:|---:|---:|---:|
+| `poll`   | 72 000 | 72 006 | 28.5 MB | ~0 % |
+| `epoll`  | 72 000 | 72 007 | 25.0 MB | ~0 % |
+
+EMFILE path: with the server's fd limit forced to 400, a 2 000-connection flood
+leaves it **alive at 0.0 % CPU**, logging the limit once; a fresh client is
+served `OK` as soon as connections free. On FreeBSD build with
+`make POLLER=kqueue` for the measurement run (`poll` at 70 000 fds spends
+~70 ms per event-loop iteration; `kqueue` is O(ready)).
 
 ## Results
 

@@ -20,6 +20,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -107,6 +109,15 @@ public:
     int run() {
         std::signal(SIGPIPE, SIG_IGN);
 
+        raise_fd_limit();
+
+        // A reserved descriptor we can free on EMFILE so the accept loop can
+        // still drain and reject an incoming connection instead of spinning
+        // (see accept_ready_clients).
+#ifndef _WIN32
+        spare_fd_ = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+#endif
+
         if (!poller_.valid()) {
             std::cerr << "Failed to create event poller\n";
             return 1;
@@ -126,7 +137,8 @@ public:
 
         poller_.add(listen_fd_, true, false);
 
-        std::cout << "Exchange Server listening on " << host_ << ':' << port_ << "\n";
+        std::cout << "Exchange Server listening on " << host_ << ':' << port_
+                  << " (event loop: " << Poller::backend_name() << ")\n";
 
         while (true) {
             if (!poll_once()) break;
@@ -146,10 +158,30 @@ private:
     std::string host_;
     std::string port_;
     int listen_fd_ = -1;
+    int spare_fd_ = -1;
     uint64_t next_client_id_ = 1;
     uint64_t next_order_id_ = 0;
+    bool emfile_warned_ = false;
 
     Poller poller_;
+
+    // Raise this process's open-file-descriptor soft limit to the hard limit
+    // so the server can hold as many simultaneous connections as the OS
+    // permits (relevant to the connection-scalability bonus). On FreeBSD the
+    // hard limit is governed by kern.maxfilesperproc.
+    static void raise_fd_limit() {
+#ifndef _WIN32
+        rlimit lim{};
+        if (::getrlimit(RLIMIT_NOFILE, &lim) != 0) return;
+        if (lim.rlim_cur < lim.rlim_max) {
+            lim.rlim_cur = lim.rlim_max;
+            ::setrlimit(RLIMIT_NOFILE, &lim);
+        }
+        if (::getrlimit(RLIMIT_NOFILE, &lim) == 0) {
+            std::cerr << "fd limit (soft): " << lim.rlim_cur << "\n";
+        }
+#endif
+    }
 
     // unique_ptr keeps every Client at a stable address across rehashes, so we
     // can safely hold Client* in the ready-event scan and in the subscriber
@@ -324,9 +356,31 @@ private:
             if (client_fd == -1) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+#ifndef _WIN32
+                if (errno == EMFILE || errno == ENFILE) {
+                    // Out of file descriptors. Free the reserved fd, use it to
+                    // accept and immediately close one pending connection so
+                    // the backlog does not wedge the accept loop into a busy
+                    // spin, then reclaim the reservation.
+                    if (!emfile_warned_) {
+                        std::cerr << "accept(): file-descriptor limit reached; "
+                                     "rejecting new connections\n";
+                        emfile_warned_ = true;
+                    }
+                    if (spare_fd_ != -1) {
+                        ::close(spare_fd_);
+                        int reject = accept(listen_fd_, nullptr, nullptr);
+                        if (reject != -1) ::close(reject);
+                        spare_fd_ = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+                    }
+                    break;
+                }
+#endif
                 std::cerr << "accept() failed: " << std::strerror(errno) << "\n";
                 break;
             }
+
+            emfile_warned_ = false;
 
             if (!set_nonblocking(client_fd)) {
                 close(client_fd);
@@ -334,7 +388,6 @@ private:
             }
 
             set_tcp_nodelay(client_fd);
-            set_socket_buffers(client_fd);
 
             auto client = std::make_unique<Client>();
             client->fd = client_fd;
