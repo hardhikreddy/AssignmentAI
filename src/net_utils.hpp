@@ -18,6 +18,7 @@ typedef SSIZE_T ssize_t;
 #else
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
