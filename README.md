@@ -1,8 +1,9 @@
 # COL334 Assignment 2 — The Socket Exchange
 
 This is a C++17 TCP exchange server with interactive trader and market-data
-clients. The server uses one `poll()` event loop for listening, reads, and
-queued non-blocking writes.
+clients. The server is single-process, single-threaded and event-driven: one
+readiness-notification loop drives the listening socket, per-client buffered
+input, and per-client non-blocking output queues. No client can block another.
 
 ## Build
 
@@ -15,6 +16,28 @@ make
 This creates `exchange_server`, `trader_client`, and `market_data_client` at
 the repository root. The supplied scripts in `server/` and `client/` launch
 these binaries and are the interface used by `experiment.py`.
+
+### Event-loop back end
+
+The server's readiness mechanism is selected at build time via the `POLLER`
+variable (see `src/event_poller.hpp`):
+
+| Command | Back end | Notes |
+| --- | --- | --- |
+| `make` | `poll(2)` | Portable default; used for grading and all experiments. |
+| `make POLLER=kqueue` | `kqueue` (FreeBSD) | O(ready) wakeups; use for the §6.9 connection-scalability bonus. |
+| `make POLLER=epoll` | `epoll` (Linux) | For benchmarking on a Linux host only. |
+
+All back ends are level-triggered and behave identically at the protocol
+level. `make clean && make POLLER=kqueue` before the bonus scale run; the
+default `poll` build is what the autograder and `experiment.py` use.
+
+## Tests
+
+```sh
+python3 tests/stress/run_all.py     # protocol + concurrency conformance suite
+python3 tests/bench/bench.py        # throughput / fan-out / idle-scaling numbers
+```
 
 ## Run
 
