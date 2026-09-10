@@ -39,9 +39,6 @@ static constexpr size_t MAX_INPUT_BUFFER = 64 * 1024;
 static constexpr size_t MAX_OUTPUT_BUFFER = 8 * 1024 * 1024;
 static constexpr int LISTEN_BACKLOG = 1024;
 
-// Fairness caps: the amount of work a single ready socket may do before the
-// event loop moves on to other clients. The socket stays level-triggered, so
-// any leftover is handled on the next iteration.
 static constexpr size_t MAX_RECV_PER_ITERATION = 256 * 1024;
 static constexpr size_t MAX_SEND_PER_ITERATION = 1024 * 1024;
 
@@ -52,16 +49,12 @@ struct Client {
     std::string username;
     std::unordered_set<int> subscriptions;
     std::string input;
-    size_t input_offset = 0;   // cursor: avoids O(n) erase on every newline
-    // Single contiguous output buffer + write cursor eliminates one heap
-    // allocation per queued message (vs deque<string>).
+    size_t input_offset = 0;
     std::string output_buf;
     size_t output_offset = 0;
-    size_t output_bytes = 0;   // bytes currently buffered (for limit check)
+    size_t output_bytes = 0;   
     bool input_closed = false;
     bool closing = false;
-    // Cached readiness interest currently registered with the Poller, so we
-    // only issue an epoll_ctl / kevent syscall when it actually changes.
     bool want_read_registered = false;
     bool want_write_registered = false;
 };
@@ -84,9 +77,6 @@ struct OrderRef {
     OrderList::iterator iterator;
 };
 
-// Fixed-capacity token list: the protocol never has more than 4 meaningful
-// tokens, so splitting a line needs no heap allocation. Tokens beyond the
-// capacity are still counted (so arity checks reject them) but not stored.
 struct TokenList {
     static constexpr size_t CAP = 8;
     std::array<std::string_view, CAP> data{};
@@ -111,9 +101,6 @@ public:
 
         raise_fd_limit();
 
-        // A reserved descriptor we can free on EMFILE so the accept loop can
-        // still drain and reject an incoming connection instead of spinning
-        // (see accept_ready_clients).
 #ifndef _WIN32
         spare_fd_ = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
 #endif
@@ -165,10 +152,6 @@ private:
 
     Poller poller_;
 
-    // Raise this process's open-file-descriptor soft limit to the hard limit
-    // so the server can hold as many simultaneous connections as the OS
-    // permits (relevant to the connection-scalability bonus). On FreeBSD the
-    // hard limit is governed by kern.maxfilesperproc.
     static void raise_fd_limit() {
 #ifndef _WIN32
         rlimit lim{};
@@ -183,24 +166,17 @@ private:
 #endif
     }
 
-    // unique_ptr keeps every Client at a stable address across rehashes, so we
-    // can safely hold Client* in the ready-event scan and in the subscriber
-    // index without worrying about map growth invalidating them.
     std::unordered_map<int, std::unique_ptr<Client>> clients_;
     std::unordered_map<uint64_t, Client*> client_id_to_client_;
     std::unordered_map<std::string, int> trader_user_to_fd_;
     std::unordered_map<int32_t, OrderRef> order_index_;
 
-    // Subscriber index: per-instrument set of market-data clients. Holding
-    // Client* (not fd) removes a hash lookup per subscriber on every trade.
     std::unordered_set<Client*> md_subscribers_[2];
 
-    // Persistent buffers reused across poll loops (no per-loop heap alloc).
     std::vector<PollerEvent> events_;
     std::vector<int> doomed_;
-    std::string scratch_;   // reused for formatting outbound messages
+    std::string scratch_; 
 
-    // [instrument][side][price] -> FIFO list of orders at that price.
     std::map<int32_t, OrderList> books_[2][2];
 
     static int instrument_index(Instrument instrument) {
@@ -273,8 +249,6 @@ private:
         return it == client_id_to_client_.end() ? nullptr : it->second;
     }
 
-    // Register/refresh this client's readiness interest with the Poller, but
-    // only call into the kernel when the desired mask actually changed.
     void update_interest(Client& client) {
         const bool want_read = !client.input_closed && !client.closing;
         const bool want_write =
@@ -358,10 +332,6 @@ private:
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
 #ifndef _WIN32
                 if (errno == EMFILE || errno == ENFILE) {
-                    // Out of file descriptors. Free the reserved fd, use it to
-                    // accept and immediately close one pending connection so
-                    // the backlog does not wedge the accept loop into a busy
-                    // spin, then reclaim the reservation.
                     if (!emfile_warned_) {
                         std::cerr << "accept(): file-descriptor limit reached; "
                                      "rejecting new connections\n";
