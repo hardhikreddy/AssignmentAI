@@ -20,6 +20,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -37,9 +39,6 @@ static constexpr size_t MAX_INPUT_BUFFER = 64 * 1024;
 static constexpr size_t MAX_OUTPUT_BUFFER = 8 * 1024 * 1024;
 static constexpr int LISTEN_BACKLOG = 1024;
 
-// Fairness caps: the amount of work a single ready socket may do before the
-// event loop moves on to other clients. The socket stays level-triggered, so
-// any leftover is handled on the next iteration.
 static constexpr size_t MAX_RECV_PER_ITERATION = 256 * 1024;
 static constexpr size_t MAX_SEND_PER_ITERATION = 1024 * 1024;
 
@@ -50,16 +49,14 @@ struct Client {
     std::string username;
     std::unordered_set<int> subscriptions;
     std::string input;
-    size_t input_offset = 0;   // cursor: avoids O(n) erase on every newline
-    // Single contiguous output buffer + write cursor eliminates one heap
-    // allocation per queued message (vs deque<string>).
+    size_t input_offset = 0;
+
     std::string output_buf;
     size_t output_offset = 0;
-    size_t output_bytes = 0;   // bytes currently buffered (for limit check)
+    size_t output_bytes = 0;   
     bool input_closed = false;
     bool closing = false;
-    // Cached readiness interest currently registered with the Poller, so we
-    // only issue an epoll_ctl / kevent syscall when it actually changes.
+
     bool want_read_registered = false;
     bool want_write_registered = false;
 };
@@ -82,9 +79,6 @@ struct OrderRef {
     OrderList::iterator iterator;
 };
 
-// Fixed-capacity token list: the protocol never has more than 4 meaningful
-// tokens, so splitting a line needs no heap allocation. Tokens beyond the
-// capacity are still counted (so arity checks reject them) but not stored.
 struct TokenList {
     static constexpr size_t CAP = 8;
     std::array<std::string_view, CAP> data{};
@@ -107,6 +101,12 @@ public:
     int run() {
         std::signal(SIGPIPE, SIG_IGN);
 
+        raise_fd_limit();
+
+#ifndef _WIN32
+        spare_fd_ = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+#endif
+
         if (!poller_.valid()) {
             std::cerr << "Failed to create event poller\n";
             return 1;
@@ -126,7 +126,8 @@ public:
 
         poller_.add(listen_fd_, true, false);
 
-        std::cout << "Exchange Server listening on " << host_ << ':' << port_ << "\n";
+        std::cout << "Exchange Server listening on " << host_ << ':' << port_
+                  << " (event loop: " << Poller::backend_name() << ")\n";
 
         while (true) {
             if (!poll_once()) break;
@@ -146,29 +147,38 @@ private:
     std::string host_;
     std::string port_;
     int listen_fd_ = -1;
+    int spare_fd_ = -1;
     uint64_t next_client_id_ = 1;
     uint64_t next_order_id_ = 0;
+    bool emfile_warned_ = false;
 
     Poller poller_;
 
-    // unique_ptr keeps every Client at a stable address across rehashes, so we
-    // can safely hold Client* in the ready-event scan and in the subscriber
-    // index without worrying about map growth invalidating them.
+    static void raise_fd_limit() {
+#ifndef _WIN32
+        rlimit lim{};
+        if (::getrlimit(RLIMIT_NOFILE, &lim) != 0) return;
+        if (lim.rlim_cur < lim.rlim_max) {
+            lim.rlim_cur = lim.rlim_max;
+            ::setrlimit(RLIMIT_NOFILE, &lim);
+        }
+        if (::getrlimit(RLIMIT_NOFILE, &lim) == 0) {
+            std::cerr << "fd limit (soft): " << lim.rlim_cur << "\n";
+        }
+#endif
+    }
+
     std::unordered_map<int, std::unique_ptr<Client>> clients_;
     std::unordered_map<uint64_t, Client*> client_id_to_client_;
     std::unordered_map<std::string, int> trader_user_to_fd_;
     std::unordered_map<int32_t, OrderRef> order_index_;
 
-    // Subscriber index: per-instrument set of market-data clients. Holding
-    // Client* (not fd) removes a hash lookup per subscriber on every trade.
     std::unordered_set<Client*> md_subscribers_[2];
 
-    // Persistent buffers reused across poll loops (no per-loop heap alloc).
     std::vector<PollerEvent> events_;
     std::vector<int> doomed_;
-    std::string scratch_;   // reused for formatting outbound messages
+    std::string scratch_;
 
-    // [instrument][side][price] -> FIFO list of orders at that price.
     std::map<int32_t, OrderList> books_[2][2];
 
     static int instrument_index(Instrument instrument) {
@@ -241,8 +251,6 @@ private:
         return it == client_id_to_client_.end() ? nullptr : it->second;
     }
 
-    // Register/refresh this client's readiness interest with the Poller, but
-    // only call into the kernel when the desired mask actually changed.
     void update_interest(Client& client) {
         const bool want_read = !client.input_closed && !client.closing;
         const bool want_write =
@@ -324,9 +332,27 @@ private:
             if (client_fd == -1) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+#ifndef _WIN32
+                if (errno == EMFILE || errno == ENFILE) {
+                    if (!emfile_warned_) {
+                        std::cerr << "accept(): file-descriptor limit reached; "
+                                     "rejecting new connections\n";
+                        emfile_warned_ = true;
+                    }
+                    if (spare_fd_ != -1) {
+                        ::close(spare_fd_);
+                        int reject = accept(listen_fd_, nullptr, nullptr);
+                        if (reject != -1) ::close(reject);
+                        spare_fd_ = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+                    }
+                    break;
+                }
+#endif
                 std::cerr << "accept() failed: " << std::strerror(errno) << "\n";
                 break;
             }
+
+            emfile_warned_ = false;
 
             if (!set_nonblocking(client_fd)) {
                 close(client_fd);
@@ -334,7 +360,6 @@ private:
             }
 
             set_tcp_nodelay(client_fd);
-            set_socket_buffers(client_fd);
 
             auto client = std::make_unique<Client>();
             client->fd = client_fd;

@@ -1,14 +1,17 @@
 CXX ?= c++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -O2
 
-# Event-loop back end for the Exchange Server:
+# Event-loop back end for the Exchange Server, selected via POLLER=:
 #   (unset)        -> poll(2), portable default
 #   POLLER=epoll   -> Linux epoll   (local benchmarking)
 #   POLLER=kqueue  -> FreeBSD kqueue (submission-target fast path)
+#
+# Written as an indirect variable lookup (not ifeq/endif) so this works
+# unmodified under both GNU make and FreeBSD's base bmake.
 POLLER ?=
-CXXFLAGS_epoll = -DUSE_EPOLL
-CXXFLAGS_kqueue = -DUSE_KQUEUE
-CXXFLAGS += $(CXXFLAGS_$(POLLER))
+POLLERFLAG_epoll = -DUSE_EPOLL
+POLLERFLAG_kqueue = -DUSE_KQUEUE
+CXXFLAGS += $(POLLERFLAG_$(POLLER))
 
 all: exchange_server trader_client market_data_client
 

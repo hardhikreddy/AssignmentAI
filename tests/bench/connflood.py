@@ -13,11 +13,14 @@ It prints a line every --ramp connections so you can pause and take
 measurements, and keeps every socket open until Ctrl-C or --hold seconds pass.
 Uses the socket API directly (socket/connect); no framework.
 
-On the count you can reach:
-  * raise the process fd limit:      ulimit -n 200000
-  * FreeBSD system limits:           sysctl kern.maxfiles kern.maxfilesperproc
-  * if one source IP runs out of ephemeral ports, pass a host that resolves to
-    several loopback aliases or run several copies bound to 127.0.0.x.
+Reaching a high count (run tests/bench/freebsd-setup.sh once, as root, first):
+  * raise THIS process's fd limit:   ulimit -n 200000   (before running)
+  * raise system limits (FreeBSD):   sysctl kern.maxfiles kern.maxfilesperproc
+  * a single source IP only has ~64K ephemeral ports to one destination, so
+    for >60K connections use several loopback source IPs. On FreeBSD those
+    must be added as aliases first:
+        for i in 2 3 4 5 6 7 8; do ifconfig lo0 alias 127.0.0.$i/8; done
+    then pass  --src-aliases 8  (Linux routes 127.0.0.0/8 without aliases).
 """
 
 from __future__ import annotations
