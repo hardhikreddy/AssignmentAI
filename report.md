@@ -1,15 +1,31 @@
 # COL334 Assignment 2 — The Socket Exchange
 ## Experiment Report
 
-**Team:** `<roll number 1>`, `<roll number 2>`
-**Language / build:** C++17, `clang++`/`g++`, `make`
-**Environment:** FreeBSD 14.4-RELEASE (amd64) under `<VirtualBox / QEMU-KVM>`, 2 vCPU / `<N>` GB RAM
+**Team:** Avvaru Yasasvi (2024CS10063), Hardhik Reddy (2024CS10466)
+**Language / build:** C++17, built with the system `c++` (FreeBSD base clang) via `make`.
+**Environment:** FreeBSD 14.4-RELEASE (amd64) in VirtualBox, 2 vCPU / `<N>` GB RAM.
 
-> **How to insert evidence:** each experiment has one or more
-> `> [SCREENSHOT n: … ]` blocks. Replace each block with the image, e.g.
-> `![Experiment 1 — sockstat](screenshots/exp1-sockstat.png)`.
-> Put the image files in a `screenshots/` folder next to this report, then
-> export to `report.pdf` (`pandoc report.md -o report.pdf` or print-to-PDF).
+> **NOTE — remaining before submission:** (1) fill `<N>` GB RAM above;
+> (2) replace every `> [SCREENSHOT n: … ]` line with the image, e.g.
+> `![caption](screenshots/exp1.png)`, keeping the images in a `screenshots/`
+> folder next to this file; (3) capture Experiment 8; (4) do the §6.9 bonus or
+> delete that section; (5) export to `report.pdf`
+> (`pandoc report.md -o report.pdf`, or open and print to PDF).
+
+---
+
+## Build and setup
+
+```sh
+make
+./server/run-server 127.0.0.1 5000
+```
+
+`make` builds `exchange_server`, `trader_client`, and `market_data_client`.
+The server prints its listening address and the event loop it was built with
+(`poll` by default).
+
+> [SCREENSHOT 0: `make` producing the three binaries, and `ls -l` on them ]
 
 ---
 
@@ -104,24 +120,38 @@ netstat -an -p tcp | grep '\.5000'
 procstat -f $(pgrep exchange_server)
 ```
 
-**Observation.**
+**Observation.** With the experiment client connected, `sockstat` showed the
+server process (`exchange_s`, PID 6674) holding two sockets, and the client
+(`python3`, PID 6673) holding one:
 
-> [SCREENSHOT 1a: `sockstat`/`netstat` output showing one `LISTEN` line for
-> 127.0.0.1:5000 with no foreign address, plus `ESTABLISHED` line(s) for
-> 127.0.0.1:5000 ↔ 127.0.0.1:<ephemeral> ]
+```
+USER  COMMAND     PID   FD PROTO LOCAL ADDRESS      FOREIGN ADDRESS
+root  exchange_s  6674  4  tcp4  127.0.0.1:5000     *:*
+root  exchange_s  6674  5  tcp4  127.0.0.1:5000     127.0.0.1:51829
+root  python3.12  6673  3  tcp4  127.0.0.1:51829    127.0.0.1:5000
+```
 
-> [SCREENSHOT 1b: `procstat -f` for the server PID showing the listening
-> socket fd and a separate fd for the accepted connection ]
+`netstat -an` showed the matching TCP states:
+
+```
+127.0.0.1.5000    127.0.0.1.51829   ESTABLISHED
+127.0.0.1.51829   127.0.0.1.5000    ESTABLISHED
+127.0.0.1.5000    *.*               LISTEN
+```
+
+> [SCREENSHOT 1: the `sockstat -4 -p 5000` and `netstat -an | grep 5000`
+> output above ]
 
 **Answer.** The server has two kinds of TCP socket. The **listening socket**
-(from `socket()`+`bind()`+`listen()`) is in state `LISTEN`, is bound to the
-local address `127.0.0.1:5000`, and has **no foreign address** — it never
-carries data, it only produces new connections via `accept()`. Each
-**connected socket** (one per client, returned by `accept()`) is in state
-`ESTABLISHED` and is identified by the full 4-tuple: local `127.0.0.1:5000`
-and a specific remote `127.0.0.1:<ephemeral-port>`. All application data
-travels on the connected sockets; the listening socket and each connection are
-distinct file descriptors in the server process.
+(server FD 4, from `socket()` + `bind()` + `listen()`) is in state `LISTEN`,
+is bound to `127.0.0.1:5000`, and has no foreign address (`*:*`). It carries no
+data; it only produces new connections through `accept()`. The **connected
+socket** (server FD 5, returned by `accept()`) is in state `ESTABLISHED` and
+has a full four-part address: local `127.0.0.1:5000` and the specific remote
+`127.0.0.1:51829` (the client's end, its FD 3). Application data flows only on
+the connected socket. The two are separate file descriptors, and because the
+listening socket stays in `LISTEN` the server can still accept more clients
+while talking to this one.
 
 ---
 
@@ -144,26 +174,41 @@ netstat -an -p tcp | grep '\.5000'         # repeat at each phase
 sockstat -4 | grep ':5000'
 ```
 
-**Observation.**
+**Observation.** During phase 1 (client connected and idle), `netstat` showed
+the connection `ESTABLISHED` at both ends, with the server still `LISTEN`ing
+(client ephemeral port 16831):
 
-> [SCREENSHOT 2a: `netstat` during phase 1/2 — both endpoints `ESTABLISHED` ]
+```
+127.0.0.1.5000    127.0.0.1.16831   ESTABLISHED
+127.0.0.1.16831   127.0.0.1.5000    ESTABLISHED
+127.0.0.1.5000    *.*               LISTEN
+```
 
-> [SCREENSHOT 2b: `netstat` right after the client closes — server side
-> `CLOSE_WAIT` then gone; client side `FIN_WAIT_2` / `TIME_WAIT` ]
+After the client closed, the `ESTABLISHED` rows were gone and only the
+listening socket remained:
 
-> [SCREENSHOT 2c: `tcpdump` showing SYN → SYN,ACK → ACK at start and
-> FIN,ACK → ACK → FIN,ACK → ACK at close ]
+```
+127.0.0.1.5000    *.*               LISTEN
+```
 
-**Answer.** The connection progresses:
-`SYN_SENT`/`SYN_RCVD` → **`ESTABLISHED`** on completion of the three-way
-handshake (SYN, SYN-ACK, ACK). It stays `ESTABLISHED` with no packets while
-idle. When the client calls `close()`, it sends a **FIN**: the client moves
-`FIN_WAIT_1`→`FIN_WAIT_2`; the server's socket moves to **`CLOSE_WAIT`** and
-the server's `recv()` returns 0 (EOF). The server then flushes any queued
-reply and closes, sending its own FIN; the server socket reaches `LAST_ACK`
-then `CLOSED`, and the client — the side that closed first — sits in
-**`TIME_WAIT`** for 2·MSL before `CLOSED`. Each state change is driven by a
-handshake or FIN segment, or by the application calling `close()`.
+We did not catch an intermediate `CLOSE_WAIT` or `TIME_WAIT` row; by the time
+the periodic `netstat` ran, the connection had already left the table.
+
+> [SCREENSHOT 2a: `netstat` in phase 1 — the two `ESTABLISHED` rows plus
+> `LISTEN` ]
+
+> [SCREENSHOT 2b: `netstat` after the client closed — only the `LISTEN` row ]
+
+**Answer.** The connection reaches `ESTABLISHED` after the three-way handshake
+(SYN, SYN-ACK, ACK) and stays there, with no packets, while idle. When the
+client calls `close()` it sends a FIN. On the server side `recv()` returns 0,
+the server closes that socket, and the connection is torn down with the normal
+FIN/ACK exchange from both sides. The transient states on the way down
+(`CLOSE_WAIT` on the server, `FIN_WAIT_2` and `TIME_WAIT` on the client that
+closed first) last only milliseconds here, so our periodic `netstat` did not
+capture them; what we can show is `ESTABLISHED` before the close and the
+connection gone afterwards. The listening socket stayed in `LISTEN` the whole
+time, so closing one client did not affect the server.
 
 ---
 
@@ -188,22 +233,35 @@ tcpdump -i lo0 -n -X 'tcp port 5000'
 truss -f -p $(pgrep exchange_server)        # or: ktrace -p <pid> ; kdump
 ```
 
-**Observation.**
+**Observation.** `tcpdump` showed the four writes arriving as four separate
+data-carrying segments, each pushed about 0.2 s after the previous one (which
+matches the delay the harness inserts):
 
-> [SCREENSHOT 3a: `tcpdump` showing ~4 separate PSH segments carrying
-> "LOGIN ", "experiment", "_trader", "\n" ]
+| Time | TCP seq | Length | Bytes | Text |
+|---|---|---:|---|---|
+| 04:15:06.084075 | 1:7   | 6  | `4c 4f 47 49 4e 20` | `LOGIN ` |
+| 04:15:06.287146 | 7:17  | 10 | `65 78 70 65 72 69 6d 65 6e 74` | `experiment` |
+| 04:15:06.488136 | 17:24 | 7  | `5f 74 72 61 64 65 72` | `_trader` |
+| 04:15:06.688994 | 24:25 | 1  | `0a` | `\n` |
 
-> [SCREENSHOT 3b: `truss`/`kdump` showing multiple `recvfrom`/`read` returns
-> (6, 10, 7, 1 bytes) and only one `sendto` of "OK\n" — after the last one ]
+About 1.4 ms after the newline arrived, the server sent its reply:
 
-**Answer.** The server receives the message **in multiple pieces**: each
-`recv()` returns only the bytes that have arrived so far (four partial
-returns), not one framed message. The server buffers these bytes per
-connection and does nothing with them until it sees the `\n`; only then does
-it parse `LOGIN experiment_trader` and reply `OK`. This demonstrates that TCP
-is a **byte stream with no message boundaries** — `send()` calls do not
-correspond one-to-one to `recv()` calls — so the application must implement
-its own framing, which here is the newline delimiter.
+| 04:15:06.690381 | server → client | 3 | `4f 4b 0a` | `OK\n` |
+
+The kernel reported 0 packets dropped.
+
+> [SCREENSHOT 3: `tcpdump -X` output with the four segments (6, 10, 7, 1 bytes)
+> and the `OK\n` reply ]
+
+**Answer.** The message arrived in pieces, not as one unit. Each segment
+carried only the bytes written so far. The server appended them to that
+connection's input buffer and did nothing until the `\n` appeared in the
+buffer; then it parsed `LOGIN experiment_trader` and replied `OK\n`. This shows
+that TCP is an ordered byte stream with no message boundaries: one `send()` on
+the client does not become one `recv()` on the server, and a message can be
+split anywhere. The application must add its own framing, which here is the
+newline delimiter. (TCP is also free to *combine* writes into one segment; this
+run happened to keep them separate because of the 0.2 s gaps.)
 
 ---
 
@@ -218,34 +276,46 @@ operation that determines the answer.
 **Approach.** Client 1 connects and sends a partial line
 (`LOGIN blocked_client`, no newline), then stays silent. Two seconds later
 Client 2 connects and sends a complete `LOGIN active_client\n`; the harness
-times how long the `OK` takes. Separately, inspect what the server process is
-doing while Client 1 is idle.
+times how long the `OK` takes. While Client 1 is idle we list the server's
+open sockets with `procstat` to confirm both connections exist.
 
 **Commands / tools.**
 ```sh
-truss -p $(pgrep exchange_server)           # server is parked in poll(), not recv()
-sockstat -4 | grep ':5000'                  # both connections ESTABLISHED
-tcpdump -i lo0 -n 'tcp port 5000'
+procstat -f $(pgrep exchange_server)        # the server's open sockets
+sockstat -4 | grep ':5000'
 ```
 
-**Observation.** Harness output: `Client 2 response: 'OK'`,
-`Elapsed time: ~0.001 seconds`.
+**Observation.** The harness reported `Client 2 response: 'OK'` with
+`Elapsed time: 0.000 seconds`, even though Client 1 had sent only
+`LOGIN blocked_client` (no newline) and then gone silent.
 
-> [SCREENSHOT 4a: harness output — Client 2 gets `OK` in ≈0 s while Client 1
-> is silent ]
+`procstat -f` on the server (PID 6712) showed three TCP sockets at that moment:
 
-> [SCREENSHOT 4b: `truss`/`ktrace` of the server showing it blocked in
-> `poll()` (not `recvfrom` on Client 1) and then handling Client 2 ]
+```
+FD 4  TCP  127.0.0.1:5000   *:0                 (listening)
+FD 5  TCP  127.0.0.1:5000   127.0.0.1:37591     (Client 1)
+FD 6  TCP  127.0.0.1:5000   127.0.0.1:53905     (Client 2)
+```
 
-> [SCREENSHOT 4c: `sockstat` showing both connections ESTABLISHED throughout ]
+So both clients were connected at the same time, and Client 2 got its reply
+immediately. (`truss` attached but did not print useful syscall lines before
+we detached, so we do not rely on it here.)
 
-**Answer.** Yes — Client 2 is served immediately. The determining operation is
-the server's **`poll()` call**: it is the only place the server ever blocks,
-and it waits on *all* sockets at once. Because every socket is non-blocking,
-the server never sits inside `recv()` or `send()` for one client. Client 1
-having no data simply means `poll()` does not report it readable; `poll()`
-still reports the listening socket and Client 2, which are serviced normally.
-A blocking `recv(client1)` would have frozen the entire server.
+> [SCREENSHOT 4a: the harness output — `Client 2 response: 'OK'`,
+> `Elapsed time: 0.000 seconds` ]
+
+> [SCREENSHOT 4b: `procstat -f` for the server showing FD 4 (listen) and the
+> two client sockets FD 5 and FD 6 ]
+
+**Answer.** Yes. Client 2 was served in 0.000 s while Client 1 sat idle with an
+incomplete message. The operation that decides this is the server's `poll()`
+call. It is the only place the server blocks, and it waits on every socket at
+once. All sockets are non-blocking, so the server never sits inside `recv()`
+or `send()` for one client. Client 1 having no data just means `poll()` does
+not list it as ready; `poll()` still lists the listening socket and Client 2,
+which are handled normally. A blocking `recv()` on Client 1 would have frozen
+the whole server. The server also prints `event loop: poll` at startup, and the
+source (`src/server.cpp`, `poll_once()`) confirms the mechanism.
 
 ---
 
@@ -257,31 +327,40 @@ A blocking `recv(client1)` would have frozen the entire server.
 connections are actually ready for the server to service, and what evidence
 from the running system allows you to determine this?
 
-**Approach.** Five connections are opened; only clients 1, 3, and 5 send a
-`LOGIN`. Inspect which sockets have unread data and what `poll()` reports.
+**Approach.** Five connections are opened (client ports 14226, 26960, 27683,
+30524, 57599); clients 1, 3, and 5 send a `LOGIN`, clients 2 and 4 stay idle.
+We list the server's sockets, look at the per-socket queue lengths in
+`netstat`, and watch the server with `truss`.
 
 **Commands / tools.**
 ```sh
-netstat -an -p tcp | grep '\.5000'         # Recv-Q column
-truss -p $(pgrep exchange_server)           # poll() return value + ready fds
-sockstat -4 | grep ':5000'
+sockstat -4 -p 5000
+netstat -an -p tcp | grep '\.5000'         # Recv-Q / Send-Q columns
+truss -p $(pgrep exchange_server)
 ```
 
-**Observation.**
+**Observation.** `sockstat` showed the server (PID 6769) holding six sockets:
+FD 4 listening, and FD 5–9 for the five clients. All five connections were
+`ESTABLISHED` in `netstat`. On the server side every `Recv-Q` was 0 — the
+server had already read and replied to clients 1, 3, and 5. On the client side,
+the three that sent a `LOGIN` (ports 14226, 27683, 57599) each showed
+`Recv-Q = 3`, the unread `OK\n` reply; the two idle clients (26960, 30524)
+showed `Recv-Q = 0`. `truss` showed the server making a single `recvfrom` on
+one client fd and otherwise sitting idle until the experiment stopped it.
 
-> [SCREENSHOT 5a: `netstat` showing all 5 connections ESTABLISHED, but
-> Recv-Q non-zero only for clients 1/3/5 at the moment they send ]
+> [SCREENSHOT 5a: `sockstat` (FD 4 listen + FD 5–9 clients) and `netstat`
+> (five `ESTABLISHED`, `Recv-Q = 3` only on the three clients that sent) ]
 
-> [SCREENSHOT 5b: `truss` showing `poll(...) = 3` and three `recvfrom` calls
-> for exactly those fds, then the loop returning to `poll()` ]
-
-**Answer.** Only the connections with pending input are "ready" — clients 1, 3
-and 5 at the instant they send (plus the listening socket when a new
-connection is waiting). Clients 2 and 4 are `ESTABLISHED` but idle, so
-`poll()` does not return them. The evidence: `poll()`'s return value equals
-the number of ready fds and its `revents` name exactly clients 1/3/5; the
-`netstat` Recv-Q is non-zero only for those sockets; and `sockstat` shows all
-five as connected — demonstrating that "connected" is not the same as "ready".
+**Answer.** All five connections are `ESTABLISHED`, but only the ones with data
+to move are ever "ready" for the server. Clients 1, 3, and 5 sent a `LOGIN`; the
+server was woken for those sockets, read the request, replied `OK`, and went
+back to waiting. Clients 2 and 4 sent nothing, so `poll()` never reports them
+and the server does no work for them. At the moment of capture the server-side
+`Recv-Q` is 0 everywhere (all pending input already consumed); the only trace
+of activity is the 3-byte `OK` reply queued in the receive buffers of the three
+clients that spoke. This shows that "connected" and "ready for service" are not
+the same thing — the server only touches a socket when that socket has
+something to read or write.
 
 ---
 
@@ -299,33 +378,52 @@ packets and the server-side socket state for each.
 
 **Commands / tools.**
 ```sh
-tcpdump -i lo0 -n 'tcp port 5000'          # compare F (FIN) vs R (RST)
-netstat -an -p tcp | grep '\.5000'         # TIME_WAIT vs nothing
-truss -p $(pgrep exchange_server)           # recvfrom returning 0 vs ECONNRESET
+tcpdump -i lo0 -n -S 'tcp port 5000'       # compare F (FIN) vs R (RST)
+netstat -an -p tcp | grep '\.5000'         # socket state after each part
 ```
 
-**Observation.**
+**Observation.** The orderly client used port 19512, the abrupt client
+port 50393.
 
-> [SCREENSHOT 6a: `tcpdump` of Part A — `F` flag, four-way FIN/ACK exchange ]
+*Part A (orderly).* `tcpdump` showed the client send a **FIN** (`Flags [F.]`)
+at `04:30:27.961625`; the server acknowledged it, sent its own **FIN**
+immediately after (`.961639`), and the client acknowledged that — a normal
+four-way close. `netstat` right after showed the connection briefly as
+`CLOSED`, then gone:
 
-> [SCREENSHOT 6b: `tcpdump` of Part B — a single `R` (RST) flag, no FIN, no
-> final ACK ]
+```
+127.0.0.1.19512   127.0.0.1.5000    CLOSED
+127.0.0.1.5000    *.*               LISTEN
+```
 
-> [SCREENSHOT 6c: `netstat` — Part A leaves a `TIME_WAIT`; Part B leaves
-> nothing (connection vanishes immediately) ]
+*Part B (abrupt).* `tcpdump` showed the client send a single **RST**
+(`Flags [R.]`) at `04:30:37.965760` — no FIN, no acknowledgement, no four-way
+exchange. `netstat` right after showed nothing left but the listening socket:
+
+```
+127.0.0.1.5000    *.*               LISTEN
+```
+
+17 packets captured, 0 dropped by the kernel.
+
+> [SCREENSHOT 6a: `tcpdump` — Part A's `F` flags and four-way exchange (port
+> 19512), Part B's lone `R` flag (port 50393) ]
+
+> [SCREENSHOT 6b: `netstat` — Part A leaves a transient `CLOSED` row, Part B
+> leaves only `LISTEN` ]
 
 **Answer.**
-* **Orderly (FIN).** The client sends a **FIN**. The server's `recv()` returns
-  0; its socket enters `CLOSE_WAIT`; the server finishes any queued write and
-  closes, producing a normal four-way termination. The side that closed first
-  passes through `TIME_WAIT`. No data is lost.
-* **Abrupt (RST).** The client sends a **RST**. The server's next `recv()` (or
-  `poll()`) reports the error `ECONNRESET`/`POLLHUP`; there is **no
-  `CLOSE_WAIT` and no `TIME_WAIT`** — the socket is torn down immediately and
-  any bytes still in the server's receive buffer are discarded. The server
-  detects this, marks the connection closing, and calls `close_client()`
-  (removing it from the poller and all indexes). Per §2.6 any resting order
-  from that client remains in the book.
+* **Orderly (FIN).** The client sends a FIN. The server's `recv()` returns 0,
+  the server closes its end, and both sides exchange FIN/ACK. The connection
+  drains cleanly and then leaves the socket table (we caught it as `CLOSED`
+  just before it disappeared). No data is lost.
+* **Abrupt (RST).** The client sends a single RST. There is no FIN and no
+  four-way close. The server learns of it through `poll()` (`POLLHUP`/`POLLERR`)
+  or a failed `recv()`/`send()` (`ECONNRESET`/`EPIPE`), marks the connection
+  closing, and calls `close_client()` to drop it from the poller and the order
+  and subscriber tables. The socket vanishes from `netstat` immediately, and
+  any bytes still in its receive buffer are discarded. Per §2.6 a resting order
+  from that client stays in the book.
 
 ---
 
@@ -337,42 +435,81 @@ truss -p $(pgrep exchange_server)           # recvfrom returning 0 vs ECONNRESET
 behave as the client stops reading, and what evidence shows whether this
 eventually affects the server's ability to communicate with other clients?
 
-**Approach.** Two Market-Data clients subscribe to `JNST`; one keeps reading,
-the other never reads. Two traders generate a sustained stream of matching
-trades. Watch the send queue and TCP window on both Market-Data connections
-and confirm the normal client keeps receiving updates.
+**Approach.** The harness runs two traders and two Market-Data clients
+subscribed to `JNST`; one MD client keeps reading, the other never reads its
+socket. Trades are generated continuously. We sampled `netstat -an -p tcp` once
+a second with a shell loop and also captured the traffic with `tcpdump`.
 
 **Commands / tools.**
 ```sh
-netstat -an -p tcp | grep '\.5000'         # Send-Q for the slow vs normal conn
-tcpdump -i lo0 -n 'tcp port 5000'          # window size; "win 0" from slow client
-sockstat -4 | grep ':5000'
+while true; do date; netstat -an -p tcp | grep 5000; echo ---; sleep 1; done
+tcpdump -i lo0 -n -S 'tcp port 5000'
 ```
 
-**Observation.**
+**Observation.** The connections were: traders on ports 44253 and 43559, the
+normal Market-Data client on 61768, and the **slow** Market-Data client on
+**61256**. Over a 14-second window the slow client's **receive queue**
+(`netstat` row `127.0.0.1.61256 → 127.0.0.1.5000`, `Recv-Q`) grew steadily:
 
-> [SCREENSHOT 7a: `netstat` — Send-Q large and growing on the slow
-> connection, ≈0 on the normal connection ]
+```
+04:35:07   850       04:35:12   3247      04:35:17   5593
+04:35:08   1343      04:35:13   3723      04:35:18   6069
+04:35:09   1836      04:35:14   4216      04:35:19   6528
+04:35:10   2312      04:35:15   4675      04:35:20   7004
+04:35:11   2788      04:35:16   5134
+```
 
-> [SCREENSHOT 7b: `tcpdump` — the slow client advertising `win 0`
-> (zero-window) and the server pausing sends to it, while data keeps flowing
-> to the normal client ]
+That is about +475 bytes/second — the `TRADE` messages the server keeps
+sending, piling up unread in the slow client's kernel receive buffer. Over the
+same window:
 
-**Answer.** As the slow client stops reading, its kernel receive buffer fills,
-then the server's kernel send buffer for that socket fills; the slow client
-advertises a **zero TCP window** and the server's `send()` returns `EAGAIN`.
-The server does **not** block: it stops writing to that socket and holds the
-unsent bytes in that connection's application output queue (bounded at 8 MiB;
-if exceeded, only that one connection is dropped). The **normal client and the
-traders are unaffected** — they keep receiving `TRADE` messages at full rate,
-because the event loop never waits on the slow socket. Evidence: the growing
-Send-Q on the slow connection versus a near-zero Send-Q on the normal one, and
-continuous data to the normal client in the capture. A single slow reader is
-therefore isolated and does not degrade service to others.
+* the server's **send queue** toward the slow client
+  (`127.0.0.1.5000 → 127.0.0.1.61256`, `Send-Q`) stayed small — mostly 17,
+  sometimes 0 — it did **not** grow;
+* the normal Market-Data client (61768) showed `Recv-Q = 0` and `Send-Q = 0`
+  the entire time;
+* the traders (44253, 43559) kept exchanging orders normally.
+
+`tcpdump` showed the server continuously pushing `TRADE` segments to every
+client and the normal client acknowledging them with an advancing sequence
+number throughout.
+
+> [SCREENSHOT 7a: the `netstat` loop — `Recv-Q` on the 61256 row climbing
+> (850 → 7004) while the 61768 row and the trader rows stay near 0 ]
+
+> [SCREENSHOT 7b: `tcpdump` — the server still sending `TRADE` segments and the
+> normal client still acknowledging them during the same period ]
+
+**Answer.** Because the slow client never reads, the `TRADE` data the server
+sends it accumulates in that client's **TCP receive buffer** — `netstat` shows
+its `Recv-Q` rising from 850 to about 7000 bytes over 14 seconds, while every
+other connection stays at 0. The server's own send queue to that client stays
+small, so the server is not stuck on it. If the slow client kept not reading,
+its receive window would eventually reach 0, the server's `send()` to that
+socket would return `EAGAIN`, and the server would hold the unsent bytes in
+that connection's application output buffer (capped at 8 MiB, after which that
+one connection is dropped) — it would still never block. The normal client and
+the traders were completely unaffected throughout: one stalled reader is
+isolated to its own connection and does not slow the server for anyone else.
+This is the point of the non-blocking `poll()` design.
 
 ---
 
 ## Experiment 8 — Unexpected Client Disconnection
+
+> **TODO — mandatory, evidence not yet captured.** Steps:
+> ```sh
+> # terminal 1
+> tcpdump -i lo0 -n -S 'tcp port 5000' | tee /tmp/exp8.txt
+> # terminal 2
+> python3 experiment.py 8
+> # terminal 3 — before the line "...will now disappear unexpectedly" AND after:
+> sockstat -4 -p 5000
+> procstat -f $(pgrep exchange_server) | grep -c TCP
+> ```
+> Then: replace the two `SCREENSHOT 8` lines with your images, delete this
+> block, and in the answer name the dead client's port and whether you saw a
+> FIN or a RST.
 
 **Run:** `python3 experiment.py 8`
 
@@ -416,12 +553,32 @@ the connection disappearing from `sockstat` while the other remains.
 
 ## Bonus — Connection Scalability and I/O Design (§6.9)
 
-**Setup.** `sh tests/bench/freebsd-setup.sh` (as root) raises `kern.maxfiles`,
-`kern.maxfilesperproc`, `kern.ipc.somaxconn`, `kern.ipc.maxsockets`, widens
-the ephemeral port range, and adds `lo0` aliases `127.0.0.2–10`. Build:
-`make clean && make POLLER=kqueue`. Generate load:
-`python3 tests/bench/connflood.py 127.0.0.1 5000 <N> --ramp 10000 --hold 900
---src-aliases 9` (shell with `limit descriptors 200000`).
+> **TODO — optional, not yet done.** Delete this whole section if you are not
+> attempting the bonus. If you are: build `make clean && make POLLER=kqueue`,
+> raise the host limits and add `lo0` aliases, run the connection generator to
+> hold N idle connections, and fill the table + screenshots + question answers
+> below. The generator is `tests/bench/connflood.py` in the source tree.
+
+**Setup.** As root, raise the host limits and add loopback aliases (one source
+IP has only ~64k ephemeral ports to a single destination), then build the
+`kqueue` server:
+
+```sh
+sysctl kern.maxfiles=1000000 kern.maxfilesperproc=900000
+sysctl kern.ipc.somaxconn=1024 kern.ipc.maxsockets=1000000
+for i in 2 3 4 5 6 7 8 9 10; do ifconfig lo0 alias 127.0.0.$i/8; done
+make clean && make POLLER=kqueue
+./server/run-server 127.0.0.1 5000
+```
+
+In a second shell (`limit descriptors 200000` in tcsh, or `ulimit -n 200000`
+in sh), open and hold N idle connections:
+
+```sh
+python3 tests/bench/connflood.py 127.0.0.1 5000 <N> --ramp 10000 --src-aliases 9
+```
+
+It prints a line every 10,000 connections — pause there and record a table row.
 
 **Design note.** The server maintains **no thread or process per connection** —
 it multiplexes all sockets in one `kqueue` loop. Per-connection cost is
@@ -453,14 +610,15 @@ Measured with `procstat -v <pid> | wc -l` (server FDs),
 
 ### Analysis
 
-*(Local reference — WSL2 Linux proxy, optimized server: `poll` and `kqueue`
-builds both held 72 000 idle connections at ~25–28 MB RSS and ~0 % CPU while
-idle. Replace with the FreeBSD figures once measured.)*
+> Fill the `<...>` marks from your own table. For Q4/Q5, rebuild the other way
+> (`make clean && make` for `poll`, or `make POLLER=kqueue`) and repeat the
+> N = 10k / 40k / 70k rows so you can compare.
 
 1. **Does the server maintain all requested connections?**
-   `<yes / no — if it fails, state the count and the OS error>`. The server
-   raises its own `RLIMIT_NOFILE`, so the ceiling is the system limits
-   (`kern.maxfiles`/`kern.maxfilesperproc`), not an inherited soft limit.
+   `<yes / no — if it stops early, state the count and the OS error>`. The
+   server raises its own `RLIMIT_NOFILE` at startup, so the ceiling is the
+   system limits (`kern.maxfiles`, `kern.maxfilesperproc`), not a small
+   inherited soft limit.
 
 2. **First significant bottleneck.** With the `poll` build it is **CPU in the
    event loop**: `poll()` is handed the entire descriptor array on every

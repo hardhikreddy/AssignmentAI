@@ -1,5 +1,8 @@
 CXX ?= c++
-CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -O2
+# Use += so -std=c++17 is always added, even when the base make (FreeBSD bmake)
+# has already predefined CXXFLAGS to "-O2 -pipe". With ?= the standard flag
+# would be silently dropped on FreeBSD.
+CXXFLAGS += -std=c++17 -Wall -Wextra -O2
 
 # Event-loop back end for the Exchange Server, selected via POLLER=:
 #   (unset)        -> poll(2), portable default

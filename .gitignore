@@ -4,3 +4,6 @@ market_data_client
 *.o
 .DS_Store
 .vscode/
+*.zip
+_wa_extract/
+screenshots/

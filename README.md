@@ -1,71 +1,40 @@
 # COL334 Assignment 2 — The Socket Exchange
 
-This is a C++17 TCP exchange server with interactive trader and market-data
-clients. The server is single-process, single-threaded and event-driven: one
-readiness-notification loop drives the listening socket, per-client buffered
-input, and per-client non-blocking output queues. No client can block another.
+A TCP exchange server with a trader client and a market-data client.
 
-## Build
+## Language and build
 
-Use a POSIX-like environment with a C++17 compiler and `make`.
+- **Language:** C++17.
+- **Compiler:** the system `c++` (FreeBSD base `clang++`); `g++` also works.
+- **Build tool:** `make` (the FreeBSD base `make` is fine; no GNU make needed).
 
 ```sh
 make
 ```
 
-This creates `exchange_server`, `trader_client`, and `market_data_client` at
-the repository root. The supplied scripts in `server/` and `client/` launch
-these binaries and are the interface used by `experiment.py`.
+This produces three executables at the repository root: `exchange_server`,
+`trader_client`, and `market_data_client`. The launcher scripts in `server/`
+and `client/` `exec` these binaries.
 
-### Event-loop back end
+`make clean` removes the executables.
 
-The server's readiness mechanism is selected at build time via the `POLLER`
-variable (see `src/event_poller.hpp`):
+No configuration, environment variables, or extra software are required.
 
-| Command | Back end | Notes |
-| --- | --- | --- |
-| `make` | `poll(2)` | Portable default; used for grading and all experiments. |
-| `make POLLER=kqueue` | `kqueue` (FreeBSD) | O(ready) wakeups; use for the §6.9 connection-scalability bonus. |
-| `make POLLER=epoll` | `epoll` (Linux) | For benchmarking on a Linux host only. |
+## Running
 
-All back ends are level-triggered and behave identically at the protocol
-level. `make clean && make POLLER=kqueue` before the bonus scale run; the
-default `poll` build is what the autograder and `experiment.py` use.
-
-## Tests
-
-```sh
-python3 tests/stress/run_all.py     # protocol + concurrency conformance suite
-python3 tests/bench/bench.py        # throughput / fan-out / idle-scaling numbers
-```
-
-No configuration or environment variables are required. See
-[FREEBSD.md](FREEBSD.md) for step-by-step build/run/measurement on the VM,
-including the §6.9 connection-scalability bonus.
-
-## Connection scalability
-
-The server raises its own `RLIMIT_NOFILE` at startup, does not pin socket
-buffer sizes, and rejects connections gracefully once the descriptor limit is
-hit (no crash, no busy-spin). It has been verified holding 72 000 simultaneous
-idle connections in ~25 MB RSS. For the bonus measurement run, build with
-`make POLLER=kqueue`.
-
-## Run
-
-Start the server:
+Start the Exchange Server (host and port are arguments):
 
 ```sh
 ./server/run-server 127.0.0.1 5000
 ```
 
-Start a trader:
+Start a Trader Client (host, port, username):
 
 ```sh
 ./client/run-trader 127.0.0.1 5000 alice
 ```
 
-Example trader input:
+then type commands on stdin, one per line:
 
 ```text
 BUY JNST 100 238
@@ -74,26 +43,38 @@ CANCEL 0
 QUIT
 ```
 
-Start a market-data client, optionally with initial subscriptions:
+Start a Market-Data Client (host, port, then zero or more instruments to
+subscribe to immediately):
 
 ```sh
 ./client/run-market-data 127.0.0.1 5000 JNST IMCT
 ```
 
-It also accepts `SUBSCRIBE`, `UNSUBSCRIBE`, and `QUIT` interactively.
+It also accepts `SUBSCRIBE <instrument>`, `UNSUBSCRIBE <instrument>`, and
+`QUIT` on stdin.
 
-## Protocol and experiments
+## Protocol summary
 
-Supported instruments are `JNST` and `IMCT`. A trader begins with
-`LOGIN <username>`. Accepted orders receive `ORDER_ACCEPTED <id>`; matched
-traders receive `BOUGHT`/`SOLD`, and subscribers receive `TRADE` updates.
+Instruments are `JNST` and `IMCT`. Quantities and prices are integers in
+`1 .. 2147483647`. A Trader Client first sends `LOGIN <username>`. An accepted
+order gets `ORDER_ACCEPTED <id>`; a fill sends `BOUGHT`/`SOLD` to the two
+traders and `TRADE` to every client subscribed to that instrument. Two orders
+match only when they are the same instrument, opposite sides, and exactly the
+same price.
 
-After building, run the supplied harness from this directory:
+## Source layout
 
-```sh
-python3 experiment.py 1
-```
+| File | Purpose |
+| --- | --- |
+| `src/server.cpp` | Exchange Server: `poll()` event loop, framing, order book. |
+| `src/trader.cpp` | Trader Client. |
+| `src/market_data.cpp` | Market-Data Client. |
+| `src/net_utils.hpp` | Shared socket helpers (connect, listen, non-blocking). |
+| `src/event_poller.hpp` | Readiness-loop wrapper (`poll` by default). |
 
-See [socket-exchange-guide.md](socket-exchange-guide.md) for the protocol and
-[experiment-runbook.md](experiment-runbook.md) for the experiments. Run
-`make clean` to remove compiled binaries.
+## Concurrency / I/O
+
+Single process, single thread, one `poll()` loop over all sockets, every socket
+non-blocking. Per-client input and output are buffered, so an idle, slow, or
+disconnected client never blocks the others. See `report.pdf` §"Implementation
+Decisions" for the reasoning.
