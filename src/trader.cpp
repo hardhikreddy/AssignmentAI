@@ -22,8 +22,6 @@
 
 #include "net_utils.hpp"
 
-// Print all complete '\n'-terminated lines from buffer using a read cursor
-// instead of erasing from the front on every newline (avoids O(n^2) shifts).
 static void print_complete_lines(std::string& buffer, size_t& offset) {
     while (true) {
         const size_t pos = buffer.find('\n', offset);
@@ -36,7 +34,6 @@ static void print_complete_lines(std::string& buffer, size_t& offset) {
         std::cout << line << '\n' << std::flush;
     }
 
-    // Compact: only copy-shift when we've consumed at least half.
     if (offset >= buffer.size() / 2 || offset >= 4096) {
         buffer.erase(0, offset);
         offset = 0;
@@ -122,11 +119,8 @@ int main(int argc, char* argv[]) {
                                        pos - stdin_offset);
                     stdin_offset = pos + 1;
 
-                    // Strip trailing CR.
                     if (!sv.empty() && sv.back() == '\r') sv.remove_suffix(1);
 
-                    // Build the line to send (need a null-terminated std::string
-                    // for send_all_blocking, plus the '\n').
                     std::string line(sv);
                     line += '\n';
                     if (!send_all_blocking(fd, line)) {
@@ -139,7 +133,6 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                // Compact stdin buffer.
                 if (stdin_offset >= stdin_buffer.size() / 2 || stdin_offset >= 4096) {
                     stdin_buffer.erase(0, stdin_offset);
                     stdin_offset = 0;

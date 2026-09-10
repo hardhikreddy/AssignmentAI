@@ -1,24 +1,5 @@
 #pragma once
 
-// Readiness-notification abstraction for the Exchange Server event loop.
-//
-// Three interchangeable back ends, selected at compile time:
-//
-//   (default)      poll(2)          - portable, O(n) scan in the kernel
-//   -DUSE_EPOLL    epoll (Linux)    - O(ready), for local benchmarking
-//   -DUSE_KQUEUE   kqueue (FreeBSD) - O(ready), submission-target fast path
-//
-// All back ends are used in level-triggered mode so the server may stop
-// draining a socket early (fairness caps) without losing a wakeup.
-//
-// Interface:
-//   poller.add(fd, want_read, want_write)
-//   poller.mod(fd, want_read, want_write)   // idempotent
-//   poller.del(fd)
-//   int n = poller.wait(events);            // blocks; fills `events`
-//
-// Each Event reports fd and the readable/writable/error/hangup flags.
-
 #include <cstdint>
 #include <vector>
 
@@ -46,9 +27,7 @@ struct PollerEvent {
     bool hangup = false;
 };
 
-// ---------------------------------------------------------------------------
 #if defined(USE_EPOLL)
-// ---------------------------------------------------------------------------
 
 class Poller {
 public:
@@ -92,7 +71,6 @@ public:
             pe.hangup   = (e.events & (EPOLLHUP | EPOLLRDHUP)) != 0;
             out.push_back(pe);
         }
-        // Grow the scratch buffer if we filled it completely.
         if (n == static_cast<int>(raw_.size())) raw_.resize(raw_.size() * 2);
         return n;
     }
@@ -109,10 +87,7 @@ private:
     std::vector<epoll_event> raw_;
 };
 
-// ---------------------------------------------------------------------------
 #elif defined(USE_KQUEUE)
-// ---------------------------------------------------------------------------
-
 class Poller {
 public:
     Poller() : kq_(::kqueue()) {}
@@ -131,9 +106,6 @@ public:
     }
 
     void del(int fd) {
-        // A closed descriptor is removed from the kqueue automatically, so we
-        // just forget our bookkeeping. If the caller deletes before closing,
-        // emit explicit EV_DELETEs for whatever is currently active.
         auto it = state_.find(fd);
         if (it == state_.end()) return;
         if (it->second & R) set_filter(fd, EVFILT_READ, EV_DELETE);
@@ -177,10 +149,6 @@ public:
 private:
     enum : uint8_t { R = 1, W = 2 };
 
-    // Only emit a change when a filter actually turns on or off, tracked per
-    // fd in state_. This avoids redundant kevent traffic and, more importantly,
-    // avoids EV_DELETE on a filter that was never registered (which would fail
-    // the whole change batch).
     void apply(int fd, bool want_read, bool want_write) {
         uint8_t& cur = state_[fd];
         const bool have_r = cur & R;
@@ -200,8 +168,6 @@ private:
 
     void flush_changes() {
         if (changes_.empty()) return;
-        // EV_RECEIPT forces one status result per change into the receipt
-        // buffer, so a single bad change cannot abort the rest of the batch.
         receipts_.resize(changes_.size());
         ::kevent(kq_, changes_.data(), static_cast<int>(changes_.size()),
                  receipts_.data(), static_cast<int>(receipts_.size()), nullptr);
@@ -215,9 +181,7 @@ private:
     std::vector<struct kevent> raw_;
 };
 
-// ---------------------------------------------------------------------------
-#else   // default: poll(2)
-// ---------------------------------------------------------------------------
+#else   
 
 class Poller {
 public:

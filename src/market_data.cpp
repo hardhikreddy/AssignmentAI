@@ -26,8 +26,6 @@ static bool valid_instrument(std::string_view s) {
     return s == "JNST" || s == "IMCT";
 }
 
-// Print all complete '\n'-terminated lines from buffer using a read cursor
-// instead of erasing from the front on every newline (avoids O(n^2) shifts).
 static void print_complete_lines(std::string& buffer, size_t& offset) {
     while (true) {
         const size_t pos = buffer.find('\n', offset);
@@ -40,7 +38,6 @@ static void print_complete_lines(std::string& buffer, size_t& offset) {
         std::cout << line << '\n' << std::flush;
     }
 
-    // Compact: only copy-shift when we've consumed a significant portion.
     if (offset >= buffer.size() / 2 || offset >= 4096) {
         buffer.erase(0, offset);
         offset = 0;
@@ -152,7 +149,6 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                // Compact stdin buffer.
                 if (stdin_offset >= stdin_buffer.size() / 2 || stdin_offset >= 4096) {
                     stdin_buffer.erase(0, stdin_offset);
                     stdin_offset = 0;
