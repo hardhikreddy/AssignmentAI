@@ -52,7 +52,7 @@ struct Client {
     size_t input_offset = 0;
     std::string output_buf;
     size_t output_offset = 0;
-    size_t output_bytes = 0;   
+    size_t output_bytes = 0;
     bool input_closed = false;
     bool closing = false;
     bool want_read_registered = false;
@@ -175,7 +175,7 @@ private:
 
     std::vector<PollerEvent> events_;
     std::vector<int> doomed_;
-    std::string scratch_; 
+    std::string scratch_;
 
     std::map<int32_t, OrderList> books_[2][2];
 

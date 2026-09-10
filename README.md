@@ -78,3 +78,23 @@ Single process, single thread, one `poll()` loop over all sockets, every socket
 non-blocking. Per-client input and output are buffered, so an idle, slow, or
 disconnected client never blocks the others. See `report.pdf` §"Implementation
 Decisions" for the reasoning.
+
+## Optional builds
+
+The readiness primitive is selected at build time:
+
+```sh
+make                  # poll(2), the default; used for grading
+make POLLER=kqueue    # kqueue, for the §6.9 scalability bonus (FreeBSD)
+make POLLER=epoll     # epoll (Linux only)
+```
+
+## Tests and bonus tooling
+
+Standard-library Python 3 only; run from the project root:
+
+```sh
+python3 tests/stress/run_all.py                 # conformance / stress suite
+python3 tests/bench/connflood.py <host> <port> <N>   # §6.9 idle-connection generator
+sh tests/bench/freebsd-setup.sh                 # one-time host tuning for the bonus (run as root)
+```

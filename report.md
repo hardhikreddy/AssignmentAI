@@ -5,12 +5,6 @@
 **Language / build:** C++17, built with the system `c++` (FreeBSD base clang) via `make`.
 **Environment:** FreeBSD 14.4-RELEASE (amd64) in VirtualBox, 4 GB RAM / 20 GB disk.
 
-> **NOTE — remaining before submission:** (1) Experiments 0–8 screenshots are
-> all in place; the Exp 7 `tcpdump` image is from a separate trade-saturated run
-> (different ports) — recapture if you want it to cross-reference the Exp 7
-> `netstat` loop. (2) Do the §6.9 bonus or delete that section. (3) Export to
-> `report.pdf` (`pandoc report.md -o report.pdf`, or open and print to PDF).
-
 ---
 
 ## Build and setup
@@ -24,7 +18,7 @@ make
 The server prints its listening address and the event loop it was built with
 (`poll` by default).
 
-![`make` builds the three binaries; `ls -l` on them](screenshots/exp0-make.png)
+![`make` builds the three binaries; `ls -l` on them](screenshots/exp0-make.jpg)
 
 ---
 
@@ -62,7 +56,8 @@ The readiness primitive is selected at build time through a small abstraction
   readiness wait, which watches *all* clients simultaneously.
 * **Cost.** No per-connection thread/process means no per-connection stack or
   scheduler overhead: application state is ~0.3 KB per connection, and the
-  server holds 70 000+ idle connections in ~25 MB RSS. A thread-per-connection
+  server holds 70 000 idle connections in ~26 MB RSS on the default `poll`
+  build, ~44 MB on the `kqueue` build (measured, §6.9). A thread-per-connection
   design would hit thread-stack and lock-contention limits well before the
   70 000-connection bonus target, for a workload that is I/O-bound rather than
   CPU-bound.
@@ -138,7 +133,7 @@ root  python3.12  6673  3  tcp4  127.0.0.1:51829    127.0.0.1:5000
 127.0.0.1.5000    *.*               LISTEN
 ```
 
-![`sockstat -4 -p 5000` and `netstat -an | grep 5000` — server FD 4 (LISTEN) and FD 5 (ESTABLISHED to :51829)](screenshots/exp1-sockets.png)
+![`sockstat -4 -p 5000` and `netstat -an | grep 5000` — server FD 4 (LISTEN) and FD 5 (ESTABLISHED to :51829)](screenshots/exp1-sockets.jpg)
 
 **Answer.** The server has two kinds of TCP socket. The **listening socket**
 (server FD 4, from `socket()` + `bind()` + `listen()`) is in state `LISTEN`,
@@ -192,7 +187,7 @@ listening socket remained:
 We did not catch an intermediate `CLOSE_WAIT` or `TIME_WAIT` row; by the time
 the periodic `netstat` ran, the connection had already left the table.
 
-![`netstat` phase 1 (top): two `ESTABLISHED` rows for :16831 plus `LISTEN`. After the client closed (bottom): only the `LISTEN` row remains](screenshots/exp2-netstat.png)
+![`netstat` phase 1 (top): two `ESTABLISHED` rows for :16831 plus `LISTEN`. After the client closed (bottom): only the `LISTEN` row remains](screenshots/exp2-netstat.jpg)
 
 **Answer.** The connection reaches `ESTABLISHED` after the three-way handshake
 (SYN, SYN-ACK, ACK) and stays there, with no packets, while idle. When the
@@ -245,11 +240,11 @@ About 1.4 ms after the newline arrived, the server sent its reply:
 
 The kernel reported 0 packets dropped.
 
-![`tcpdump -X` — connection setup and the start of the four writes](screenshots/exp3-tcpdump-a.png)
+![`tcpdump -X` — connection setup and the start of the four writes](screenshots/exp3-tcpdump-a.jpg)
 
-![`tcpdump -X` — the four data segments (6, 10, 7, 1 bytes) spelling `LOGIN `/`experiment`/`_trader`/`\n`, then the server's `OK\n` reply](screenshots/exp3-tcpdump-b.png)
+![`tcpdump -X` — the four data segments (6, 10, 7, 1 bytes) spelling `LOGIN `/`experiment`/`_trader`/`\n`, then the server's `OK\n` reply](screenshots/exp3-tcpdump-b.jpg)
 
-![`tcpdump -X` — connection close; `22 packets captured, 0 dropped by kernel`](screenshots/exp3-tcpdump-c.png)
+![`tcpdump -X` — connection close; `22 packets captured, 0 dropped by kernel`](screenshots/exp3-tcpdump-c.jpg)
 
 **Answer.** The message arrived in pieces, not as one unit. Each segment
 carried only the bytes written so far. The server appended them to that
@@ -299,9 +294,9 @@ So both clients were connected at the same time, and Client 2 got its reply
 immediately. (`truss` attached but did not print useful syscall lines before
 we detached, so we do not rely on it here.)
 
-![harness output — `Client 2 response: 'OK'`, `Elapsed time: 0.000 seconds`; Client 1 on :37591, Client 2 on :53905](screenshots/exp4-harness.png)
+![harness output — `Client 2 response: 'OK'`, `Elapsed time: 0.000 seconds`; Client 1 on :37591, Client 2 on :53905](screenshots/exp4-harness.jpg)
 
-![`procstat -f` for the server (PID 6712) — FD 4 listening, FD 5 → :37591 (idle Client 1), FD 6 → :53905 (Client 2)](screenshots/exp4-procstat.png)
+![`procstat -f` for the server (PID 6712) — FD 4 listening, FD 5 → :37591 (idle Client 1), FD 6 → :53905 (Client 2)](screenshots/exp4-procstat.jpg)
 
 **Answer.** Yes. Client 2 was served in 0.000 s while Client 1 sat idle with an
 incomplete message. The operation that decides this is the server's `poll()`
@@ -344,7 +339,7 @@ the three that sent a `LOGIN` (ports 14226, 27683, 57599) each showed
 showed `Recv-Q = 0`. `truss` showed the server making a single `recvfrom` on
 one client fd and otherwise sitting idle until the experiment stopped it.
 
-![`sockstat` (server PID 6769, FD 4 listen + FD 5–9 for the five clients) and `netstat` — five `ESTABLISHED`, `Recv-Q = 3` only on :14226, :27683, :57599 (the clients that sent a `LOGIN`); the `truss` line shows `recvfrom(...) = 0` then `SIGTERM`](screenshots/exp5-sockets.png)
+![`sockstat` (server PID 6769, FD 4 listen + FD 5–9 for the five clients) and `netstat` — five `ESTABLISHED`, `Recv-Q = 3` only on :14226, :27683, :57599 (the clients that sent a `LOGIN`); the `truss` line shows `recvfrom(...) = 0` then `SIGTERM`](screenshots/exp5-sockets.jpg)
 
 **Answer.** All five connections are `ESTABLISHED`, but only the ones with data
 to move are ever "ready" for the server. Clients 1, 3, and 5 sent a `LOGIN`; the
@@ -401,9 +396,9 @@ exchange. `netstat` right after showed nothing left but the listening socket:
 
 17 packets captured, 0 dropped by the kernel.
 
-![`tcpdump -S` — Part A: `[F.]` from :19512 at 04:30:27.961625, server `[F.]` back at .961639, then ACK (four-way close). Part B: a lone `[R.]` from :50393 at 04:30:37.965760. 17 packets captured, 0 dropped](screenshots/exp6-tcpdump.png)
+![`tcpdump -S` — Part A: `[F.]` from :19512 at 04:30:27.961625, server `[F.]` back at .961639, then ACK (four-way close). Part B: a lone `[R.]` from :50393 at 04:30:37.965760. 17 packets captured, 0 dropped](screenshots/exp6-tcpdump.jpg)
 
-![`netstat` — Part A leaves a transient `127.0.0.1.19512 … CLOSED` row, then only `LISTEN` remains after Part B](screenshots/exp6-netstat.png)
+![`netstat` — Part A leaves a transient `127.0.0.1.19512 … CLOSED` row, then only `LISTEN` remains after Part B](screenshots/exp6-netstat.jpg)
 
 **Answer.**
 * **Orderly (FIN).** The client sends a FIN. The server's `recv()` returns 0,
@@ -467,13 +462,13 @@ same window:
 client and the normal client acknowledging them with an advancing sequence
 number throughout.
 
-![`netstat` loop 04:35:07–11 — slow client :61256 `Recv-Q` climbing 850 → 2312 while every other row stays at 0](screenshots/exp7-netstat-1.png)
+![`netstat` loop 04:35:07–11 — slow client :61256 `Recv-Q` climbing 850 → 2312 while every other row stays at 0](screenshots/exp7-netstat-1.jpg)
 
-![`netstat` loop 04:35:11–16 — :61256 `Recv-Q` 2788 → 4675, others still 0](screenshots/exp7-netstat-2.png)
+![`netstat` loop 04:35:11–16 — :61256 `Recv-Q` 2788 → 4675, others still 0](screenshots/exp7-netstat-2.jpg)
 
-![`netstat` loop 04:35:16–21 — :61256 `Recv-Q` 5134 → 7004; the normal MD client and both traders remain at `Recv-Q = Send-Q = 0`](screenshots/exp7-netstat-3.png)
+![`netstat` loop 04:35:16–21 — :61256 `Recv-Q` 5134 → 7004; the normal MD client and both traders remain at `Recv-Q = Send-Q = 0`](screenshots/exp7-netstat-3.jpg)
 
-![`tcpdump` (separate trade-saturated run) — the server keeps pushing market-data segments to every client and the reading clients keep acknowledging them with an advancing sequence number](screenshots/exp7-tcpdump.png)
+![`tcpdump` (separate trade-saturated run) — the server keeps pushing market-data segments to every client and the reading clients keep acknowledging them with an advancing sequence number](screenshots/exp7-tcpdump.jpg)
 
 **Answer.** Because the slow client never reads, the `TRADE` data the server
 sends it accumulates in that client's **TCP receive buffer** — `netstat` shows
@@ -587,12 +582,6 @@ table while every other connection stayed `ESTABLISHED`.
 
 ## Bonus — Connection Scalability and I/O Design (§6.9)
 
-> **TODO — optional, not yet done.** Delete this whole section if you are not
-> attempting the bonus. If you are: build `make clean && make POLLER=kqueue`,
-> raise the host limits and add `lo0` aliases, run the connection generator to
-> hold N idle connections, and fill the table + screenshots + question answers
-> below. The generator is `tests/bench/connflood.py` in the source tree.
-
 **Setup.** As root, raise the host limits and add loopback aliases (one source
 IP has only ~64k ephemeral ports to a single destination), then build the
 `kqueue` server:
@@ -619,72 +608,113 @@ it multiplexes all sockets in one `kqueue` loop. Per-connection cost is
 therefore just the socket, a file descriptor, and ~0.3 KB of application
 state; there is no per-connection stack or scheduler entry.
 
-### Resource-measurement table (FreeBSD VM)
+**Measurement.** A single `snap.sh` helper recorded, at each 10 000-connection
+step: the timestamp and server PID; the established-connection count from
+`netstat` (on loopback this counts **both** endpoints of every connection, so it
+reads `2N + 1` including the listener); the server's open FD count from
+`procstat`; RSS and `%CPU` from `ps`; `kern.openfiles` / `kern.maxfiles` from
+`sysctl`; and the mbuf / socket-buffer cluster usage from `netstat -m`.
 
-Measured with `procstat -v <pid> | wc -l` (server FDs),
-`ps -o rss,%cpu -p <pid>`, `sysctl kern.openfiles kern.maxfiles`,
-`sockstat -4 | grep -c :5000`, `netstat -m`.
+### Resource-measurement table (FreeBSD VM, `kqueue` build, server PID 20939)
 
-| Idle connections | Server memory (RSS) | Server CPU | Server open FDs | System-wide open FDs | Socket-buffer used / limit | Max connections established |
-|---:|---|---|---|---|---|---|
-| 10 000 | | | | | | |
-| 20 000 | | | | | | |
-| 30 000 | | | | | | |
-| 40 000 | | | | | | |
-| 50 000 | | | | | | |
-| 60 000 | | | | | | |
-| 70 000 | | | | | | |
+| Idle connections (N) | Server RSS | Server %CPU | Server open FDs | `netstat` ESTABLISHED (both ends) | System-wide open files (`kern.openfiles` / `kern.maxfiles`) | Socket-buffer clusters in use / max (`netstat -m`) |
+|---:|---:|---:|---:|---:|---|---|
+| 10 000 | 32 792 KB | 0.1 % | 10 011 | 20 001 | 20 134 / 1 000 000 | 0 / 262 144 |
+| 20 000 | 32 976 KB | 0.6 % | 20 011 | 40 001 | 40 134 / 1 000 000 | 0 / 262 144 |
+| 30 000 | 33 152 KB | 0.4 % | 30 011 | 60 001 | 60 134 / 1 000 000 | 0 / 262 144 |
+| 40 000 | 33 328 KB | 0.5 % | 40 011 | 80 001 | 80 134 / 1 000 000 | 0 / 262 144 |
+| 50 000 | 37 932 KB | 0.5 % | 50 011 | 100 001 | 100 134 / 1 000 000 | 0 / 262 144 |
+| 60 000 | 42 812 KB | 0.1 % | 60 011 | 120 001 | 120 134 / 1 000 000 | 0 / 262 144 |
+| 70 000 | 43 888 KB | 0.0 % | 70 011 | 140 001 | 140 134 / 1 000 000 | 0 / 262 144 |
 
-> [SCREENSHOT B1: commands + output at 10 000 idle connections — connection
-> count and all measurements visible ]
+From 10 000 to 70 000 idle connections the server's FD count tracks N exactly
+(N + 11 for stdio, the listener, the `kqueue` fd, etc.), RSS grows by only
+~11 MB total (≈0.16 KB per extra connection), `%CPU` never leaves the
+0–0.6 % noise band, and the mbuf-cluster count stays at **0** — the kernel
+allocates no socket-buffer memory for a connection with nothing queued, because
+the server does not pin `SO_SNDBUF`/`SO_RCVBUF`.
 
-> [SCREENSHOT B2: same at 40 000 idle connections ]
+![`snap.sh` at 10 000 and 20 000 idle connections](screenshots/bonus-kqueue-10k-20k.png)
 
-> [SCREENSHOT B3: same at 70 000 idle connections ]
+![`snap.sh` at 30 000, 40 000 and 50 000 idle connections](screenshots/bonus-kqueue-30k-50k.png)
+
+![`snap.sh` at 50 000, 60 000 and 70 000 idle connections](screenshots/bonus-kqueue-50k-70k.png)
+
+![`snap.sh` final reading — 70 000 idle connections held (140 001 endpoints, 70 011 FDs, RSS 43 888 KB, 0.0 %CPU)](screenshots/bonus-kqueue-70k.png)
 
 ### Analysis
 
-> Fill the `<...>` marks from your own table. For Q4/Q5, rebuild the other way
-> (`make clean && make` for `poll`, or `make POLLER=kqueue`) and repeat the
-> N = 10k / 40k / 70k rows so you can compare.
+1. **Does the server maintain all requested connections?** **Yes** — all 70 000
+   were established and held simultaneously (`netstat` shows 140 001 endpoints,
+   `procstat` shows 70 011 server FDs), with no connection refused or dropped
+   and the server still responsive. The server raises its own `RLIMIT_NOFILE`
+   to the hard limit at startup, so the ceiling is the system limits
+   (`kern.maxfiles = 1 000 000`, `kern.maxfilesperproc`), not a small inherited
+   soft limit; at 70 000 connections `kern.openfiles` is only 140 134, ~14 % of
+   `kern.maxfiles`, so there is substantial headroom left.
 
-1. **Does the server maintain all requested connections?**
-   `<yes / no — if it stops early, state the count and the OS error>`. The
-   server raises its own `RLIMIT_NOFILE` at startup, so the ceiling is the
-   system limits (`kern.maxfiles`, `kern.maxfilesperproc`), not a small
-   inherited soft limit.
+2. **First significant bottleneck.** For the pure *idle-holding* workload
+   nothing in the table saturates — RSS is ~44 MB at 70 000 connections, system
+   FD usage is ~14 % of the limit, socket-buffer clusters are 0, and `%CPU` is
+   ~0 (idle connections generate no readiness events, so the event loop simply
+   sleeps). The bottleneck appears once those connections carry **traffic**, and
+   it is **CPU spent per event-loop wakeup**, scaling differently by primitive:
+   * with the portable **`poll(2)`** build the kernel is handed the whole
+     descriptor array and the server scans all of it on *every* wakeup, so the
+     cost of servicing one active event is **O(N)** in the total connection
+     count — an active client's round-trip latency grows with the number of
+     otherwise-idle connections;
+   * with the **`kqueue`** build the kernel returns only the descriptors that
+     are actually ready, so servicing an active event is **O(ready)**,
+     independent of how many idle connections exist.
 
-2. **First significant bottleneck.** With the `poll` build it is **CPU in the
-   event loop**: `poll()` is handed the entire descriptor array on every
-   wakeup and scans it, so per-iteration cost grows linearly with the *total*
-   connection count even though almost all are idle — measured active-client
-   round-trip latency rises roughly in proportion to N (≈1 ms per 1 000 idle
-   connections locally). Memory is **not** the constraint in this range
-   (~0.3 KB app state per connection). `<confirm which resource saturates
-   first on the VM from the table — expect FDs or CPU, not RSS>`.
+   The `kqueue` resource table is consistent with this — `%CPU` never leaves the
+   0–0.6 % band from 10 000 to 70 000 idle connections — and Q5 measures the
+   `poll` build directly for comparison.
 
-3. **How the concurrency/I/O design contributes.** The server uses a single
-   thread with level-triggered readiness multiplexing — no per-connection
-   thread/process (hence the small RSS and single scheduler entity), but the
-   portable `poll(2)` interface forces O(total connections) work per wakeup.
-   The cost is proportional to how many sockets exist, not how many are active.
+3. **How the concurrency/I/O design contributes.** The single-thread,
+   single readiness-loop, no-thread-per-connection design is what keeps RSS flat
+   (~0.16 KB extra per connection, one scheduler entity, no per-connection
+   stack) and lets one process hold 70 000 sockets at all. The one liability of
+   the design is that the *portable* form of it — `poll(2)` — must re-examine
+   every descriptor each wakeup, making the loop's cost proportional to how many
+   sockets **exist** rather than how many are **active**. Selecting `kqueue` at
+   build time removes that liability without changing anything else about the
+   architecture.
 
-4. **Would changing the mechanism help?** Yes. `kqueue` (FreeBSD) delivers only
-   the sockets that are actually ready, making each wakeup O(ready) instead of
-   O(total). Locally, active-client latency with the `epoll`/`kqueue`-style
-   loop stays roughly flat (~0.4 ms) from 1 000 to 20 000 idle connections
-   instead of growing linearly. Switching instead to thread-per-connection
-   would **not** help — it would replace the `poll` scan with per-thread stack
-   memory (MBs each) and scheduler/lock contention, capping the connection
-   count far below 70 000.
+4. **Would changing the mechanism help?** For the resource use in the table,
+   no — Q5 shows the `poll` build holds 70 000 idle connections just as well
+   (and with *less* memory). The mechanism matters for **per-event latency
+   under load**: swapping `poll` for **`kqueue`** (FreeBSD) or `epoll` (Linux)
+   makes servicing an active event O(ready) instead of O(total), so an active
+   client's latency stops depending on the idle-connection count. Switching the
+   other direction, to **thread-per-connection**, would *not* help: it would
+   trade the `poll` scan for ~70 000 thread stacks (MBs each — gigabytes total)
+   plus scheduler and lock contention, and would hit a hard wall long before
+   70 000 connections.
 
-5. **Trade-off.** `kqueue`/`epoll` add one `kevent`/`epoll_ctl` syscall each
-   time a connection's read/write interest changes; on a small, trade-saturated
-   deployment this costs ≈10 % throughput versus plain `poll` (the server
-   minimises it by only calling the kernel on an actual interest change). For
-   the mostly-idle many-connection regime `kqueue` is a large net win. That is
-   why `poll` is the default build and `kqueue` is opt-in for this bonus.
-   `<add your before/after numbers from `tests/bench/bench.py` and the table>`.
+5. **Quantify the trade-off.** We re-ran the same measurement on the default
+   **`poll`** build holding 70 000 idle connections:
 
-> [SCREENSHOT B4: `tests/bench/bench.py` idle-scaling output for the `poll`
-> build vs the `kqueue` build, showing latency-vs-N ]
+   | Metric at 70 000 idle | `poll` build | `kqueue` build |
+   |---|---:|---:|
+   | Server open FDs (`procstat -f`) | 70 011 | 70 011 |
+   | Server RSS (`ps -o rss`) | 26 196 KB | 43 888 KB |
+   | Server %CPU (idle) | 0.0 % | 0.0 % |
+   | `kern.openfiles` | 140 123 | 140 134 |
+   | mbuf / socket-buffer clusters in use | 0 | 0 |
+   | All 70 000 connections held? | yes | yes |
+
+   ![`poll` build holding 70 000 idle connections — `make`, server on :5000, then `procstat` / `ps` / `sysctl` / `netstat -m`](screenshots/bonus-poll-70k.png)
+
+   Both mechanisms sustain the 70 000-connection target with negligible CPU and
+   zero socket-buffer pressure; the `poll` build actually uses ~18 MB *less* RSS,
+   because its per-connection bookkeeping is just one `pollfd` plus a hash-map
+   slot, whereas the `kqueue` `Poller` also keeps a per-fd interest-state map and
+   kernel-side filter registrations. The `kqueue` cost that does not appear here
+   is one extra `kevent` syscall whenever a connection's read/write interest
+   changes — pure overhead on a small, trade-saturated deployment, which is why
+   **`poll` is the default build**. The `kqueue` benefit that also does not
+   appear in this *idle* test is O(ready) event servicing: it only pays off once
+   a large idle population coexists with active traffic, where `poll` must scan
+   all 70 000 descriptors on every wakeup and `kqueue` does not.

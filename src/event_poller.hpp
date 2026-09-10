@@ -184,7 +184,7 @@ private:
     std::vector<struct kevent> raw_;
 };
 
-#else  
+#else  // poll(2) fallback
 
 class Poller {
 public:
