@@ -3,14 +3,13 @@
 
 **Team:** Avvaru Yasasvi (2024CS10063), Hardhik Reddy (2024CS10466)
 **Language / build:** C++17, built with the system `c++` (FreeBSD base clang) via `make`.
-**Environment:** FreeBSD 14.4-RELEASE (amd64) in VirtualBox, 2 vCPU / `<N>` GB RAM.
+**Environment:** FreeBSD 14.4-RELEASE (amd64) in VirtualBox, 4 GB RAM / 20 GB disk.
 
-> **NOTE — remaining before submission:** (1) fill `<N>` GB RAM above;
-> (2) replace every `> [SCREENSHOT n: … ]` line with the image, e.g.
-> `![caption](screenshots/exp1.png)`, keeping the images in a `screenshots/`
-> folder next to this file; (3) capture Experiment 8; (4) do the §6.9 bonus or
-> delete that section; (5) export to `report.pdf`
-> (`pandoc report.md -o report.pdf`, or open and print to PDF).
+> **NOTE — remaining before submission:** (1) Experiments 0–8 screenshots are
+> all in place; the Exp 7 `tcpdump` image is from a separate trade-saturated run
+> (different ports) — recapture if you want it to cross-reference the Exp 7
+> `netstat` loop. (2) Do the §6.9 bonus or delete that section. (3) Export to
+> `report.pdf` (`pandoc report.md -o report.pdf`, or open and print to PDF).
 
 ---
 
@@ -25,7 +24,7 @@ make
 The server prints its listening address and the event loop it was built with
 (`poll` by default).
 
-> [SCREENSHOT 0: `make` producing the three binaries, and `ls -l` on them ]
+![`make` builds the three binaries; `ls -l` on them](screenshots/exp0-make.png)
 
 ---
 
@@ -139,8 +138,7 @@ root  python3.12  6673  3  tcp4  127.0.0.1:51829    127.0.0.1:5000
 127.0.0.1.5000    *.*               LISTEN
 ```
 
-> [SCREENSHOT 1: the `sockstat -4 -p 5000` and `netstat -an | grep 5000`
-> output above ]
+![`sockstat -4 -p 5000` and `netstat -an | grep 5000` — server FD 4 (LISTEN) and FD 5 (ESTABLISHED to :51829)](screenshots/exp1-sockets.png)
 
 **Answer.** The server has two kinds of TCP socket. The **listening socket**
 (server FD 4, from `socket()` + `bind()` + `listen()`) is in state `LISTEN`,
@@ -194,10 +192,7 @@ listening socket remained:
 We did not catch an intermediate `CLOSE_WAIT` or `TIME_WAIT` row; by the time
 the periodic `netstat` ran, the connection had already left the table.
 
-> [SCREENSHOT 2a: `netstat` in phase 1 — the two `ESTABLISHED` rows plus
-> `LISTEN` ]
-
-> [SCREENSHOT 2b: `netstat` after the client closed — only the `LISTEN` row ]
+![`netstat` phase 1 (top): two `ESTABLISHED` rows for :16831 plus `LISTEN`. After the client closed (bottom): only the `LISTEN` row remains](screenshots/exp2-netstat.png)
 
 **Answer.** The connection reaches `ESTABLISHED` after the three-way handshake
 (SYN, SYN-ACK, ACK) and stays there, with no packets, while idle. When the
@@ -250,8 +245,11 @@ About 1.4 ms after the newline arrived, the server sent its reply:
 
 The kernel reported 0 packets dropped.
 
-> [SCREENSHOT 3: `tcpdump -X` output with the four segments (6, 10, 7, 1 bytes)
-> and the `OK\n` reply ]
+![`tcpdump -X` — connection setup and the start of the four writes](screenshots/exp3-tcpdump-a.png)
+
+![`tcpdump -X` — the four data segments (6, 10, 7, 1 bytes) spelling `LOGIN `/`experiment`/`_trader`/`\n`, then the server's `OK\n` reply](screenshots/exp3-tcpdump-b.png)
+
+![`tcpdump -X` — connection close; `22 packets captured, 0 dropped by kernel`](screenshots/exp3-tcpdump-c.png)
 
 **Answer.** The message arrived in pieces, not as one unit. Each segment
 carried only the bytes written so far. The server appended them to that
@@ -301,11 +299,9 @@ So both clients were connected at the same time, and Client 2 got its reply
 immediately. (`truss` attached but did not print useful syscall lines before
 we detached, so we do not rely on it here.)
 
-> [SCREENSHOT 4a: the harness output — `Client 2 response: 'OK'`,
-> `Elapsed time: 0.000 seconds` ]
+![harness output — `Client 2 response: 'OK'`, `Elapsed time: 0.000 seconds`; Client 1 on :37591, Client 2 on :53905](screenshots/exp4-harness.png)
 
-> [SCREENSHOT 4b: `procstat -f` for the server showing FD 4 (listen) and the
-> two client sockets FD 5 and FD 6 ]
+![`procstat -f` for the server (PID 6712) — FD 4 listening, FD 5 → :37591 (idle Client 1), FD 6 → :53905 (Client 2)](screenshots/exp4-procstat.png)
 
 **Answer.** Yes. Client 2 was served in 0.000 s while Client 1 sat idle with an
 incomplete message. The operation that decides this is the server's `poll()`
@@ -348,8 +344,7 @@ the three that sent a `LOGIN` (ports 14226, 27683, 57599) each showed
 showed `Recv-Q = 0`. `truss` showed the server making a single `recvfrom` on
 one client fd and otherwise sitting idle until the experiment stopped it.
 
-> [SCREENSHOT 5a: `sockstat` (FD 4 listen + FD 5–9 clients) and `netstat`
-> (five `ESTABLISHED`, `Recv-Q = 3` only on the three clients that sent) ]
+![`sockstat` (server PID 6769, FD 4 listen + FD 5–9 for the five clients) and `netstat` — five `ESTABLISHED`, `Recv-Q = 3` only on :14226, :27683, :57599 (the clients that sent a `LOGIN`); the `truss` line shows `recvfrom(...) = 0` then `SIGTERM`](screenshots/exp5-sockets.png)
 
 **Answer.** All five connections are `ESTABLISHED`, but only the ones with data
 to move are ever "ready" for the server. Clients 1, 3, and 5 sent a `LOGIN`; the
@@ -406,11 +401,9 @@ exchange. `netstat` right after showed nothing left but the listening socket:
 
 17 packets captured, 0 dropped by the kernel.
 
-> [SCREENSHOT 6a: `tcpdump` — Part A's `F` flags and four-way exchange (port
-> 19512), Part B's lone `R` flag (port 50393) ]
+![`tcpdump -S` — Part A: `[F.]` from :19512 at 04:30:27.961625, server `[F.]` back at .961639, then ACK (four-way close). Part B: a lone `[R.]` from :50393 at 04:30:37.965760. 17 packets captured, 0 dropped](screenshots/exp6-tcpdump.png)
 
-> [SCREENSHOT 6b: `netstat` — Part A leaves a transient `CLOSED` row, Part B
-> leaves only `LISTEN` ]
+![`netstat` — Part A leaves a transient `127.0.0.1.19512 … CLOSED` row, then only `LISTEN` remains after Part B](screenshots/exp6-netstat.png)
 
 **Answer.**
 * **Orderly (FIN).** The client sends a FIN. The server's `recv()` returns 0,
@@ -474,11 +467,13 @@ same window:
 client and the normal client acknowledging them with an advancing sequence
 number throughout.
 
-> [SCREENSHOT 7a: the `netstat` loop — `Recv-Q` on the 61256 row climbing
-> (850 → 7004) while the 61768 row and the trader rows stay near 0 ]
+![`netstat` loop 04:35:07–11 — slow client :61256 `Recv-Q` climbing 850 → 2312 while every other row stays at 0](screenshots/exp7-netstat-1.png)
 
-> [SCREENSHOT 7b: `tcpdump` — the server still sending `TRADE` segments and the
-> normal client still acknowledging them during the same period ]
+![`netstat` loop 04:35:11–16 — :61256 `Recv-Q` 2788 → 4675, others still 0](screenshots/exp7-netstat-2.png)
+
+![`netstat` loop 04:35:16–21 — :61256 `Recv-Q` 5134 → 7004; the normal MD client and both traders remain at `Recv-Q = Send-Q = 0`](screenshots/exp7-netstat-3.png)
+
+![`tcpdump` (separate trade-saturated run) — the server keeps pushing market-data segments to every client and the reading clients keep acknowledging them with an advancing sequence number](screenshots/exp7-tcpdump.png)
 
 **Answer.** Because the slow client never reads, the `TRADE` data the server
 sends it accumulates in that client's **TCP receive buffer** — `netstat` shows
@@ -496,20 +491,6 @@ This is the point of the non-blocking `poll()` design.
 ---
 
 ## Experiment 8 — Unexpected Client Disconnection
-
-> **TODO — mandatory, evidence not yet captured.** Steps:
-> ```sh
-> # terminal 1
-> tcpdump -i lo0 -n -S 'tcp port 5000' | tee /tmp/exp8.txt
-> # terminal 2
-> python3 experiment.py 8
-> # terminal 3 — before the line "...will now disappear unexpectedly" AND after:
-> sockstat -4 -p 5000
-> procstat -f $(pgrep exchange_server) | grep -c TCP
-> ```
-> Then: replace the two `SCREENSHOT 8` lines with your images, delete this
-> block, and in the answer name the dead client's port and whether you saw a
-> FIN or a RST.
 
 **Run:** `python3 experiment.py 8`
 
@@ -530,24 +511,77 @@ sockstat -4 | grep ':5000'                 # dead conn disappears, survivor stay
 procstat -f $(pgrep exchange_server) | wc -l   # server fd count drops by one
 ```
 
-**Observation.**
+**Observation.** The harness reported the four connections (server PID 7967,
+`event loop: kqueue`):
 
-> [SCREENSHOT 8a: `tcpdump` at the moment of the kill — FIN (or RST) from the
-> dead client's ephemeral port, then the server's response ]
+```
+Surviving Market-Data Client: connected from 127.0.0.1:48671
+Buyer Trader:                 connected from 127.0.0.1:45828
+Seller Trader:                connected from 127.0.0.1:36484
+Disappearing Market-Data Client (helper process): 127.0.0.1:63049
+```
 
-> [SCREENSHOT 8b: `sockstat` before vs after — the killed connection is gone,
-> the surviving Market-Data connection is still `ESTABLISHED` and receiving ]
+![Experiment 8 harness output](screenshots/exp8-harness.png)
 
-**Answer.** When the process is killed, the OS closes its sockets, so the
-kernel sends a **FIN** (or a **RST** if data is in flight / arrives
-afterwards) to the server. TCP has no other "client gone" signal, so the
-server learns of the failure only by doing I/O: `poll()` reports
-`POLLHUP`/`POLLERR`, or the next `send()` fails with `EPIPE`/`ECONNRESET`, or
-`recv()` returns 0/`ECONNRESET`. The server then `close_client()`s that
-connection — it leaves the socket table, and the server's fd count drops by
-one. The **surviving** connection is completely unaffected. The network
-evidence is the lone FIN/RST from the dead port in the capture, together with
-the connection disappearing from `sockstat` while the other remains.
+*Before the kill.* `sockstat -4` showed the server holding four client sockets
+plus the listener — FD 6 → `:48671`, FD 7 → `:45828`, FD 8 → `:36484`, FD 9 →
+`:63049` (the helper, owned by `python3.12` PID 7970). `tcpdump` showed the
+server continuously pushing data segments (`Flags [P.]`, `TRADE`/`BOUGHT`/`SOLD`
+payloads of 17–35 bytes) to all clients, each acknowledged — so the server was
+actively communicating with the helper at the moment it died.
+
+*After the SIGKILL.* `procstat -f 7967` and `netstat -an -p tcp` both showed the
+`:63049` connection completely gone: the server now held only FD 5 (listener,
+`127.0.0.1:5000 *:0`), FD 6 `:48671`, FD 7 `:45828`, FD 8 `:36484`. `netstat`
+listed the three surviving pairs `ESTABLISHED` plus the `LISTEN` row and nothing
+for `:63049`. The server's open-fd count dropped by exactly one; it did not
+crash, and the surviving subscriber `:48671` kept receiving `TRADE` pushes
+through the post-disconnect traffic. At the end of the run the three remaining
+clients closed with a normal FIN four-way handshake (`Flags [F.]` from
+`:45828`, `:36484`, `:48671` at `07:22:23`), confirming the survivors were
+healthy the whole time. 716 packets captured, 0 dropped by the kernel.
+
+![sockets before vs after the kill](screenshots/exp8-sockets-before-after.png)
+
+![tcpdump — server pushing data segments to all three clients before the kill](screenshots/exp8-tcpdump-1.png)
+
+*The kill itself.* `tcpdump` caught the exact sequence on the helper's port
+`:63049`:
+
+| Time | Segment | Flags | Meaning |
+|---|---|---|---|
+| `07:22:03.994158` | `:5000 → :63049` len 17 | `[P.]` | server still actively pushing market data to the helper |
+| `07:22:04.130229` | `:63049 → :5000` | `[F.]` | the killed process's kernel sends a **FIN** (seq 3523400548) |
+| `07:22:04.130293` | `:5000 → :63049` | `[.]` | server ACKs the FIN — `recv()` returned 0 |
+| `07:22:04.130517` | `:5000 → :63049` | `[F.]` | server closes its own end, sends its FIN |
+| `07:22:04.130536` | `:63049 → :5000` | `[.]` | final ACK — connection fully closed |
+
+Immediately after (`07:22:04.134…`) the three surviving connections
+(`:45828`, `:36484`, `:48671`) are still exchanging `[P.]` data segments
+normally — the kill of `:63049` did not perturb them.
+
+![tcpdump — the FIN four-way close on the killed helper's port :63049, survivors still exchanging data](screenshots/exp8-kill-packet.png)
+
+![tcpdump — the three survivors' orderly FIN four-way close at the end of the run, 716 packets, 0 dropped](screenshots/exp8-tcpdump-3.png)
+
+**Answer.** When the helper process is `SIGKILL`ed it never runs its own
+shutdown code, but the OS still closes its descriptors, and here the kernel sent
+a normal **FIN** — captured at `07:22:04.130229` from `127.0.0.1:63049`,
+followed by the full four-way close (server ACK, server FIN, client ACK). (A
+**RST** would appear instead if unacknowledged data were still queued toward the
+dead socket at the instant of the kill; in this run the server's send side to
+`:63049` had drained, so a clean FIN was sent.) TCP has no other "client gone"
+signal, so the server learns of the failure only by doing I/O: its `kqueue` loop
+reports `EVFILT_READ` with `EV_EOF` (equivalently `POLLHUP`/`POLLERR` under
+`poll`), or the next `send()` fails with `EPIPE`/`ECONNRESET`, or `recv()`
+returns 0. Here `recv()` returned 0, and the server then `close_client()`s that
+connection: it is removed from the poller and the subscriber table, its
+descriptor is closed, and it disappears from `sockstat`, `procstat`, and
+`netstat` — the fd count drops by exactly one. The **surviving** Market-Data
+connection and the two traders were completely unaffected and kept exchanging
+data throughout. The network evidence is the lone FIN/close exchange on
+`:63049` in the capture together with that connection vanishing from the socket
+table while every other connection stayed `ESTABLISHED`.
 
 ---
 
