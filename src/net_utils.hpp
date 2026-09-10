@@ -30,10 +30,17 @@ inline bool set_nonblocking(int fd) {
     return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
 }
 
+// Disable Nagle's algorithm so small messages are sent immediately without
+// waiting to coalesce with subsequent data (reduces latency).
 inline void set_tcp_nodelay(int fd) {
     const int flag = 1;
     (void)::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
+
+// NOTE: the server intentionally does NOT force SO_SNDBUF / SO_RCVBUF. Pinning
+// them (e.g. to 256 KiB) disables the kernel's socket-buffer auto-tuning and
+// reserves that space per socket -- with tens of thousands of connections that
+// is tens of GiB of wired memory and defeats the connection-scalability goal.
 
 inline int connect_tcp(const std::string& host, const std::string& port) {
     addrinfo hints{};
